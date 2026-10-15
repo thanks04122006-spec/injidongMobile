@@ -17,11 +17,11 @@ import java.util.zip.Deflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-/** Writes a contract-v1.0.0 session plus the 2026-10-13 RGB sidecar index. */
+/** Writes a contract-v1.0.0 session plus the images.jsonl RGB sidecar. */
 final class CaptureSessionWriter implements AutoCloseable {
     private final File root;
     private final String sessionId;
-    private final BufferedWriter frames, rgbIndex;
+    private final BufferedWriter frames, images;
     private String lastWrittenDepthFrameId;
     private int rgbImageCount;
     private int depthFrameCount;
@@ -30,7 +30,7 @@ final class CaptureSessionWriter implements AutoCloseable {
         this.root = root; this.sessionId = sessionId;
         mkdir(root);
         frames = writer(new File(root, "frames.jsonl"));
-        rgbIndex = writer(new File(root, "rgb_index.jsonl"));
+        images = writer(new File(root, "images.jsonl"));
         mkdir(new File(root, "raw")); mkdir(new File(root, "rgb"));
     }
 
@@ -42,8 +42,12 @@ final class CaptureSessionWriter implements AutoCloseable {
         File npz = new File(frameDir, "arrays.npz");
         writeNpz(frame, npz);
         String rawRel = relative(raw);
-        JSONObject metadata = buildMetadata(frame, rawRel, sha256(raw), sha256(npz));
-        writeText(new File(frameDir, "metadata.json"), metadata.toString(2));
+        String rawHash = sha256(raw);
+        JSONObject metadata = buildMetadata(frame, rawRel, rawHash, sha256(npz));
+        File metadataFile = new File(frameDir, "metadata.json");
+        writeText(metadataFile, metadata.toString(2));
+        writeRawCaptureEvidence(frame, new File(frameDir, "raw_capture.json"),
+                metadataFile, rawRel, rawHash);
         JSONObject frameRow = new JSONObject();
         frameRow.put("frame_id", frame.frameId); frameRow.put("metadata_path", relative(new File(frameDir, "metadata.json")));
         frames.write(frameRow.toString()); frames.newLine(); frames.flush();
@@ -62,7 +66,7 @@ final class CaptureSessionWriter implements AutoCloseable {
         counts.put("phone_rgb_images", rgbImageCount); counts.put("imu_samples", imuSampleCount);
         session.put("counts", counts);
         JSONObject files = new JSONObject(); files.put("depth_index", "frames.jsonl");
-        files.put("phone_rgb_index", "rgb_index.jsonl"); files.put("phone_rgb_images", "rgb/");
+        files.put("images_index", "images.jsonl"); files.put("phone_rgb_images", "rgb/");
         files.put("imu_samples", "imu.jsonl"); files.put("depth_arrays", "<frame_id>/arrays.npz");
         files.put("raw_depth", "raw/"); session.put("files", files);
         JSONObject alignment = new JSONObject(); alignment.put("status", "unverified");
@@ -87,7 +91,7 @@ final class CaptureSessionWriter implements AutoCloseable {
         time.put("clock_domain", "android_camera_sensor"); time.put("origin", "sensor"); rgb.put("time", time);
         rgb.put("pair_status", "unverified"); rgb.put("pair_evidence", JSONObject.NULL);
         rgb.put("aligned_to_depth", false); rgb.put("alignment_method", JSONObject.NULL); rgb.put("calibration_id", calibrationId);
-        rgb.put("provenance_kind", "real"); rgbIndex.write(rgb.toString()); rgbIndex.newLine(); rgbIndex.flush();
+        rgb.put("provenance_kind", "real"); images.write(rgb.toString()); images.newLine(); images.flush();
         return true;
     }
 
@@ -101,11 +105,6 @@ final class CaptureSessionWriter implements AutoCloseable {
         camera.put("sdk", emptyNull(f.sdkVersion)); camera.put("depth_profile_id", f.calibrationId);
         provenance.put("camera", camera); provenance.put("raw_file", rawRel); provenance.put("raw_sha256", rawHash);
         provenance.put("raw_unit", "Z16"); provenance.put("raw_scale_to_m", (double) f.depthScaleToMeters);
-        provenance.put("raw_stride_bytes", f.rawDepthStrideBytes);
-        provenance.put("raw_width", f.width); provenance.put("raw_height", f.height);
-        provenance.put("raw_bytes_per_pixel", 2);
-        provenance.put("raw_byte_order", "little_endian");
-        provenance.put("raw_data_size_bytes", f.rawDepthZ16.length);
         provenance.put("synthetic_seed", JSONObject.NULL); provenance.put("synthetic_config", JSONObject.NULL); m.put("provenance", provenance);
         JSONObject storage = new JSONObject(); storage.put("file", "arrays.npz"); storage.put("sha256", npzHash);
         storage.put("depth_key", "depth_m"); storage.put("valid_mask_key", "valid_mask"); storage.put("target_mask_key", JSONObject.NULL); m.put("storage", storage);
@@ -125,6 +124,26 @@ final class CaptureSessionWriter implements AutoCloseable {
         conditions.put("material", JSONObject.NULL); conditions.put("notes", "Depth arrays.npz is rectified to pinhole pixels with nearest-neighbor remapping when source distortion is BROWN_CONRADY; original Z16 is retained unchanged under raw/. Source distortion model and coefficients are encoded in calibration_id. RGB is captured separately from the Android phone camera; phone intrinsics, RGB/Depth alignment, and cross-stream timestamp pairing are unverified."); m.put("capture_conditions", conditions);
         m.put("target_mask_info", JSONObject.NULL); m.put("support_plane", JSONObject.NULL); m.put("volume_request", JSONObject.NULL);
         return m;
+    }
+
+    /** App-specific evidence sidecar; not part of the FramePacket v1.0.0 schema. */
+    private void writeRawCaptureEvidence(DepthCameraAdapter.CameraFrame f, File file,
+                                         File metadataFile, String rawRel, String rawHash) throws Exception {
+        JSONObject evidence = new JSONObject();
+        evidence.put("evidence_format", "mobile-raw-capture-evidence-v1");
+        evidence.put("session_id", sessionId); evidence.put("frame_id", f.frameId);
+        evidence.put("paths_relative_to", "session_root");
+        evidence.put("metadata_file", relative(metadataFile));
+        evidence.put("metadata_sha256", sha256(metadataFile));
+        evidence.put("raw_file", rawRel); evidence.put("raw_sha256", rawHash);
+        evidence.put("raw_stride_bytes", f.rawDepthStrideBytes);
+        evidence.put("raw_stride_source", "sdk_getStride");
+        evidence.put("raw_width", f.width); evidence.put("raw_height", f.height);
+        evidence.put("raw_bytes_per_pixel", 2);
+        evidence.put("raw_byte_order", "little_endian");
+        evidence.put("raw_byte_order_source", "decoder_convention_not_sdk_query");
+        evidence.put("raw_data_size_bytes", f.rawDepthZ16.length);
+        writeText(file, evidence.toString(2));
     }
 
     private void writeNpz(DepthCameraAdapter.CameraFrame f, File file) throws Exception {
@@ -162,5 +181,5 @@ final class CaptureSessionWriter implements AutoCloseable {
     }
     private static Object emptyNull(String value) { return value == null || value.trim().isEmpty() ? JSONObject.NULL : value; }
     private static String repeat(char c, int n) { StringBuilder s = new StringBuilder(); for (int i = 0; i < n; i++) s.append(c); return s.toString(); }
-    @Override public synchronized void close() throws Exception { frames.close(); rgbIndex.close(); }
+    @Override public synchronized void close() throws Exception { frames.close(); images.close(); }
 }

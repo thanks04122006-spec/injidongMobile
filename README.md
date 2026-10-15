@@ -90,7 +90,7 @@ app/build/outputs/apk/debug/app-debug.apk
 Android/data/com.injidong.measurement/files/Documents/sessions/<session_id>/
 ├── session.json                  # 세션 상태, 저장 개수, 파일 목록, 정렬·전송 상태
 ├── frames.jsonl                  # Depth 프레임과 metadata.json 경로 목록
-├── rgb_index.jsonl               # RGB 이미지 경로, 해시, 시간, Depth 참조
+├── images.jsonl                  # 규격 RGB 이미지 경로, 해시, 시간, Depth 참조
 ├── imu.jsonl                     # 휴대폰 IMU 센서 샘플
 ├── raw/
 │   └── <frame_id>_depth_z16.bin  # 카메라 원본 Z16 Depth
@@ -98,33 +98,39 @@ Android/data/com.injidong.measurement/files/Documents/sessions/<session_id>/
 │   └── phone_rgb_<index>.png     # 휴대폰 RGB 원본 이미지
 └── <frame_id>/
     ├── metadata.json             # FramePacket v1.0.0 메타데이터
+    ├── raw_capture.json          # 앱 전용 raw 진단 근거(공통 스키마 밖)
     └── arrays.npz                # depth_m(float32), valid_mask(bool)
 ```
 
 `session.json`, 프레임 메타데이터, 인덱스와 IMU 샘플은 UTF-8 JSON/JSONL입니다. 이미지와 대량 Depth 배열은 규격의 저장 방식을 따라 PNG·NPZ 및 원본 Z16 파일로 보존합니다. 앱 데이터 폴더는 Android Studio **View → Tool Windows → Device Explorer**에서 확인할 수 있습니다.
 
+새로 수집하는 세션의 RGB 인덱스 파일명은 공통 규격에 맞춘 `images.jsonl`입니다. 이전 버전에서 만든 세션의 `rgb_index.jsonl`은 변경하거나 이름을 바꾸지 않습니다.
+
 주요 정렬 필드는 다음과 같습니다.
 
 - `session.json`: `rgb_depth_alignment.status = "unverified"`, `aligned_to_depth = false`
-- `rgb_index.jsonl`: `pair_status = "unverified"`, `aligned_to_depth = false`
+- `images.jsonl`: `pair_status = "unverified"`, `aligned_to_depth = false`
 - FramePacket: `sync.status = "unverified"`
 
 RGB의 `frame_id`는 가장 최근 저장된 Depth 프레임을 참조하는 인덱스 정보일 뿐, 두 센서가 동기화되었거나 픽셀 정렬되었다는 뜻은 아닙니다.
 
 ### Depth 보정값과 원본 stride
 
-각 프레임의 `metadata.json`에 SDK에서 읽은 정보를 저장합니다.
+각 프레임의 공통 `metadata.json`에는 기존 v1.0.0 필드만 저장합니다. 추가 raw 진단 정보는 같은 프레임 폴더의 `raw_capture.json`에 저장합니다. 공통 스키마와 `schema_version`은 변경하지 않습니다.
 
 | 필드 | 내용 |
 |---|---|
 | `intrinsics` | 해상도와 `fx`, `fy`, `cx`, `cy`, 보정 식별자 |
 | `intrinsics.calibration_id` | 원본 왜곡 모델과 계수를 포함한 식별 문자열 |
 | `provenance.raw_scale_to_m` | 원본 Z16 값을 미터로 변환하는 스케일 |
-| `provenance.raw_stride_bytes` | SDK에서 읽은 원본 Z16 한 행의 바이트 수. 패딩 포함 |
-| `provenance.raw_width`, `raw_height` | 원본 Depth 해상도 |
-| `provenance.raw_bytes_per_pixel` | Z16 픽셀당 바이트 수: `2` |
-| `provenance.raw_byte_order` | `little_endian` |
-| `provenance.raw_data_size_bytes` | 저장한 원본 Z16 버퍼의 전체 바이트 수 |
+| `raw_capture.json: raw_stride_bytes` | SDK에서 읽은 원본 Z16 한 행의 바이트 수. 패딩 포함 |
+| `raw_capture.json: raw_width`, `raw_height` | 원본 Depth 해상도 |
+| `raw_capture.json: raw_bytes_per_pixel` | Z16 픽셀당 바이트 수: `2` |
+| `raw_capture.json: raw_byte_order` | `little_endian` |
+| `raw_capture.json: raw_data_size_bytes` | 저장한 원본 Z16 버퍼의 전체 바이트 수 |
+
+
+`raw_capture.json`의 경로는 세션 루트 기준이며 session_id·frame_id·metadata/raw 파일 경로와 SHA-256으로 프레임에 연결됩니다. `raw_stride_bytes`는 SDK getStride()에서 받은 값입니다. `raw_byte_order=little_endian`은 현재 디코더의 고정 해석이며 SDK가 별도 조회해 준 값은 아닙니다. `evidence_format=mobile-raw-capture-evidence-v1`은 이 수정안의 앱 전용 제안 형식이고 공통규격 버전이 아닙니다. 기존 파일에는 생성하거나 소급 적용하지 않습니다. 현재 모바일 검사기는 이 sidecar를 부가 파일로 분류하고 내용까지 검증하지 않으므로, 파일 인수 검사 통과를 raw 진단 근거의 검증 완료로 확대하지 않습니다.
 
 원본 `raw/` 파일의 픽셀 `(x, y)`는 `y * raw_stride_bytes + x * 2` 바이트 위치에서 읽습니다. 패딩이 있을 수 있으므로 행 간격을 항상 `width * 2`로 가정하면 안 됩니다. 이 stride는 원본 Z16에 대한 값이며 NPZ 배열의 행 간격을 의미하지 않습니다. stride 필드는 변경된 앱으로 새로 수집한 데이터부터 저장되며 기존 파일에는 소급 추가되지 않습니다.
 
