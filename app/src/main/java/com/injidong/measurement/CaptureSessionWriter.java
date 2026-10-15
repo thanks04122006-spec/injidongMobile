@@ -101,6 +101,11 @@ final class CaptureSessionWriter implements AutoCloseable {
         camera.put("sdk", emptyNull(f.sdkVersion)); camera.put("depth_profile_id", f.calibrationId);
         provenance.put("camera", camera); provenance.put("raw_file", rawRel); provenance.put("raw_sha256", rawHash);
         provenance.put("raw_unit", "Z16"); provenance.put("raw_scale_to_m", (double) f.depthScaleToMeters);
+        provenance.put("raw_stride_bytes", f.rawDepthStrideBytes);
+        provenance.put("raw_width", f.width); provenance.put("raw_height", f.height);
+        provenance.put("raw_bytes_per_pixel", 2);
+        provenance.put("raw_byte_order", "little_endian");
+        provenance.put("raw_data_size_bytes", f.rawDepthZ16.length);
         provenance.put("synthetic_seed", JSONObject.NULL); provenance.put("synthetic_config", JSONObject.NULL); m.put("provenance", provenance);
         JSONObject storage = new JSONObject(); storage.put("file", "arrays.npz"); storage.put("sha256", npzHash);
         storage.put("depth_key", "depth_m"); storage.put("valid_mask_key", "valid_mask"); storage.put("target_mask_key", JSONObject.NULL); m.put("storage", storage);

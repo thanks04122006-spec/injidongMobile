@@ -177,7 +177,7 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
         String domainName = "realsense_" + domain.toString().toLowerCase(Locale.US);
         String frameId = String.format(Locale.US, "d405_%010d", (int) depthFrame.getClass().getMethod("getNumber").invoke(depthFrame));
         CameraFrame frame = new CameraFrame(frameId, Math.round(timestampMs * 1_000_000d), domainName,
-                width, height, intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy, scale,
+                width, height, depthStride, intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy, scale,
                 calibrationId, firmware, sdkVersion, serial,
                 z16, depthMeters, valid, depthBitmap);
         Listener current = listener;

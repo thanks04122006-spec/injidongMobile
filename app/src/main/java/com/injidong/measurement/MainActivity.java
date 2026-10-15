@@ -46,6 +46,8 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import androidx.activity.ComponentActivity;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
@@ -79,6 +81,39 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
     private TextView imuStatusView;
     private TextView imuValuesView;
     private Button streamButton;
+    private Button exportButton;
+    private TextView exportStatus;
+    private File exportableSession;
+    private File pendingExportSession;
+    private boolean exporting;
+    private final ActivityResultLauncher<String> exportLauncher = registerForActivityResult(
+            new ActivityResultContracts.CreateDocument("application/zip"), uri -> {
+                File session = pendingExportSession;
+                pendingExportSession = null;
+                if (uri == null || session == null) {
+                    exporting = false;
+                    updateExportButton();
+                    return;
+                }
+                exportStatus.setText("ZIP 내보내는 중… " + session.getName());
+                this.saveExecutor.execute(() -> {
+                    String result;
+                    try {
+                        java.io.OutputStream output = getContentResolver().openOutputStream(uri, "w");
+                        if (output == null) throw new IOException("선택한 저장 위치를 열 수 없습니다.");
+                        SessionZipExporter.write(session, output);
+                        result = "ZIP 저장 완료 · " + session.getName() + ".zip";
+                    } catch (Exception e) {
+                        result = "ZIP 저장 실패: " + e.getMessage() + " · 불완전한 ZIP은 삭제하고 다시 시도하세요.";
+                    }
+                    String message = result;
+                    runOnUiThread(() -> {
+                        exporting = false;
+                        exportStatus.setText(message);
+                        updateExportButton();
+                    });
+                });
+            });
     private SensorManager sensorManager;
     private BufferedWriter imuWriter;
     private File activeSessionDirectory;
@@ -169,6 +204,24 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         depthStatus = text("D405 Depth 프레임을 기다리고 있습니다.", 12, MUTED, false); depthStatus.setPadding(0, dp(4), 0, 0); cameraBox.addView(depthStatus, matchWrap());
         streamButton = button("데이터 수집"); streamButton.setOnClickListener(v -> { if (streaming) stopRealSense(); else startRealSense(); });
         LinearLayout.LayoutParams streamLp = new LinearLayout.LayoutParams(-1, dp(50)); streamLp.topMargin = dp(8); cameraBox.addView(streamButton, streamLp);
+        exportButton = button("수집 데이터 ZIP 내보내기");
+        exportButton.setEnabled(false);
+        exportButton.setOnClickListener(v -> {
+            if (exportableSession == null || streaming || exporting) return;
+            pendingExportSession = exportableSession;
+            exporting = true;
+            updateExportButton();
+            try { exportLauncher.launch(pendingExportSession.getName() + ".zip"); }
+            catch (Exception e) {
+                exporting = false;
+                pendingExportSession = null;
+                exportStatus.setText("저장 위치를 열지 못했습니다: " + e.getMessage());
+                updateExportButton();
+            }
+        });
+        cameraBox.addView(exportButton, matchWrap());
+        exportStatus = text("수집을 중지하고 저장이 끝나면 세션 전체를 ZIP으로 내보낼 수 있습니다.", 12, MUTED, false);
+        cameraBox.addView(exportStatus, matchWrap());
         TextView limitation = text("‘데이터 수집’ 버튼 하나로 휴대폰 IMU·RGB와 D405 Depth 수집 및 로컬 저장을 함께 시작·중지합니다. RGB와 Depth는 별도 센서이며 정렬·시각 대응은 unverified입니다. 중지 시 세션 전송 경계를 호출하지만 서버 API 미확정으로 현재 전송은 대기 처리됩니다.", 12, Color.rgb(255, 211, 117), false);
         limitation.setPadding(0, dp(8), 0, 0); cameraBox.addView(limitation, matchWrap());
         page.addView(cameraBox, new LinearLayout.LayoutParams(-1, -2));
@@ -390,7 +443,8 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
             if (!activeSessionDirectory.mkdirs() && !activeSessionDirectory.isDirectory()) throw new IOException("세션 폴더를 만들 수 없습니다.");
             captureWriter = new CaptureSessionWriter(activeSessionDirectory, sessionId);
             persistedFrameCount = 0; persistedPhoneRgbCount = 0; lastPersistedFrameMs = 0; streaming = true;
-            streamButton.setText("데이터 수집");
+            updateExportButton();
+            streamButton.setText("데이터 수집 중지");
             cameraStatus.setText("USB 장치 확인됨 · RealSense SDK 스트림 여는 중…");
             depthCameraAdapter.connect(target, new DepthCameraAdapter.Listener() {
                 @Override public void onStatus(String status) {
@@ -431,6 +485,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
             captureWriter.writeSessionSummary("collecting", imuSampleIndex);
         } catch (Exception e) {
             streaming = false;
+            updateExportButton();
             if (captureWriter != null) { try { captureWriter.close(); } catch (Exception ignored) { } captureWriter = null; }
             streamButton.setText("데이터 수집");
             cameraStatus.setText("수집을 시작하지 못했습니다: " + e.getMessage());
@@ -451,21 +506,40 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         CaptureSessionWriter writer = captureWriter; captureWriter = null;
         File finishedSession = activeSessionDirectory;
         String sessionStatus = finalStatus == null ? "complete" : "failed";
+        long finishedImuCount = imuSampleIndex;
+        streamButton.setEnabled(false);
+        exportButton.setEnabled(false);
+        exportStatus.setText("수집 파일 저장 마무리 중…");
         if (writer != null && saveExecutor != null && !saveExecutor.isShutdown()) saveExecutor.execute(() -> {
             try {
-                writer.writeSessionSummary(sessionStatus, imuSampleIndex);
+                writer.writeSessionSummary(sessionStatus, finishedImuCount);
                 writer.close();
+                runOnUiThread(() -> {
+                    exportableSession = finishedSession;
+                    streamButton.setEnabled(true);
+                    exportStatus.setText("내보내기 준비 완료 · " + finishedSession.getName()
+                            + " · JSON/JSONL, raw/, rgb/, 프레임별 metadata.json·arrays.npz 포함");
+                    updateExportButton();
+                });
                 if (sessionTransport != null && finishedSession != null) sessionTransport.sendSession(finishedSession, new SessionTransport.Callback() {
                     @Override public void onComplete() { runOnUiThread(() -> cameraStatus.setText("수집·저장·전송 완료 · " + finishedSession.getAbsolutePath())); }
                     @Override public void onError(String code, String message) { runOnUiThread(() -> cameraStatus.setText("수집·저장 완료 · 전송 대기(" + code + "): " + message)); }
                 });
             }
-            catch (Exception e) { runOnUiThread(() -> depthStatus.setText("세션 종료 오류: " + e.getMessage())); }
+            catch (Exception e) { runOnUiThread(() -> {
+                streamButton.setEnabled(true);
+                exportStatus.setText("세션 종료 오류: " + e.getMessage());
+                depthStatus.setText("세션 종료 오류: " + e.getMessage());
+            }); }
         });
         if (streamButton != null) streamButton.setText("데이터 수집");
         if (cameraStatus != null) cameraStatus.setText(finalStatus == null
                 ? "수집 중지 · 저장 Depth " + persistedFrameCount + "프레임"
                 : finalStatus + " · 저장 Depth " + persistedFrameCount + "프레임");
+    }
+
+    private void updateExportButton() {
+        if (exportButton != null) exportButton.setEnabled(exportableSession != null && !streaming && !exporting);
     }
 
     private void refreshUsbDevices() {
