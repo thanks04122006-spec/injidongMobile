@@ -1,18 +1,13 @@
 package com.injidong.measurement;
 
-import android.Manifest;
 import android.content.Context;
-import android.content.pm.PackageManager;
+import android.Manifest;
 import android.graphics.Color;
 import android.graphics.Insets;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.Matrix;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Environment;
-import android.os.Handler;
-import android.os.Looper;
+import android.content.pm.PackageManager;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
@@ -48,25 +43,17 @@ import java.util.concurrent.Executors;
 import androidx.activity.ComponentActivity;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
-import androidx.camera.core.CameraSelector;
-import androidx.camera.core.ImageCapture;
-import androidx.camera.core.ImageCaptureException;
-import androidx.camera.core.ImageProxy;
-import androidx.camera.core.Preview;
-import androidx.camera.lifecycle.ProcessCameraProvider;
-import androidx.camera.view.PreviewView;
-import androidx.core.content.ContextCompat;
-import com.google.common.util.concurrent.ListenableFuture;
 
-/** Native Android camera/result screen. The preview is RGB only; it is not a Depth stream. */
+/** Native Android measurement screen with D405 RGB/Depth and phone IMU input. */
 public final class MainActivity extends ComponentActivity implements SensorEventListener {
     private static final int CAMERA_PERMISSION_REQUEST = 31;
     private static final int BG = Color.rgb(11, 17, 27);
     private static final int PANEL = Color.rgb(22, 31, 45);
     private static final int MUTED = Color.rgb(157, 173, 193);
-    private PreviewView rgbPreview;
+    private android.widget.ImageView rgbPreview;
     private android.widget.ImageView depthPreview;
     private TextView rgbStatus;
+    private TextView rgbDiagnosticsView;
     private TextView cameraStatus;
     private TextView depthStatus;
     private TextView weightView;
@@ -129,17 +116,8 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
     private boolean cameraConnected;
     private long lastPersistedFrameMs;
     private int persistedFrameCount;
+    private int persistedRgbCount;
     private boolean pendingRealSenseStart;
-    private boolean pendingPhoneCameraStart;
-    private boolean phoneCameraBound;
-    private boolean activityResumed;
-    private volatile boolean phoneRgbCaptureInFlight;
-    private boolean phoneCameraStarting;
-    private int persistedPhoneRgbCount;
-    private ProcessCameraProvider cameraProvider;
-    private ImageCapture phoneImageCapture;
-    private final Handler phoneRgbHandler = new Handler(Looper.getMainLooper());
-    private final Runnable phoneRgbCaptureLoop = this::capturePhoneRgb;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -189,9 +167,9 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         cameraStatus = text("D405 연결 대기", 13, MUTED, true);
         cameraBox.addView(cameraStatus, matchWrap());
         FrameLayout rgbBox = new FrameLayout(this); rgbBox.setBackgroundColor(Color.BLACK);
-        rgbPreview = new PreviewView(this); rgbPreview.setScaleType(PreviewView.ScaleType.FIT_CENTER);
+        rgbPreview = new android.widget.ImageView(this); rgbPreview.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
         rgbBox.addView(rgbPreview, new FrameLayout.LayoutParams(-1, -1));
-        TextView rgbTag = text("휴대폰 RGB", 12, Color.WHITE, true); rgbTag.setPadding(dp(8), dp(5), dp(8), dp(5)); rgbTag.setBackgroundColor(0x990B111B);
+        TextView rgbTag = text("RealSense D405 RGB 미리보기", 12, Color.WHITE, true); rgbTag.setPadding(dp(8), dp(5), dp(8), dp(5)); rgbTag.setBackgroundColor(0x990B111B);
         FrameLayout.LayoutParams rgbTagLp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START); rgbTagLp.setMargins(dp(8), dp(8), 0, 0); rgbBox.addView(rgbTag, rgbTagLp);
         LinearLayout.LayoutParams viewLp = new LinearLayout.LayoutParams(-1, dp(210)); viewLp.topMargin = dp(8); cameraBox.addView(rgbBox, viewLp);
         FrameLayout depthBox = new FrameLayout(this); depthBox.setBackgroundColor(Color.BLACK);
@@ -200,7 +178,13 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         TextView depthTag = text("RealSense Depth 미리보기", 12, Color.WHITE, true); depthTag.setPadding(dp(8), dp(5), dp(8), dp(5)); depthTag.setBackgroundColor(0x990B111B);
         FrameLayout.LayoutParams depthTagLp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START); depthTagLp.setMargins(dp(8), dp(8), 0, 0); depthBox.addView(depthTag, depthTagLp);
         LinearLayout.LayoutParams depthLp = new LinearLayout.LayoutParams(-1, dp(210)); depthLp.topMargin = dp(8); cameraBox.addView(depthBox, depthLp);
-        rgbStatus = text("휴대폰 카메라 연결 대기", 12, MUTED, false); rgbStatus.setPadding(0, dp(7), 0, 0); cameraBox.addView(rgbStatus, matchWrap());
+        rgbStatus = text("D405 RGB 프레임을 기다리고 있습니다.", 12, MUTED, false); rgbStatus.setPadding(0, dp(7), 0, 0); cameraBox.addView(rgbStatus, matchWrap());
+        TextView diagnosticTitle = text("RGB 수신 진단", 12, Color.WHITE, true); diagnosticTitle.setPadding(0, dp(8), 0, dp(3)); cameraBox.addView(diagnosticTitle, matchWrap());
+        rgbDiagnosticsView = text("진단 대기 · ‘데이터 수집’을 누르면 USB/SDK/RGB 단계별 상태가 표시됩니다.", 11, MUTED, false);
+        rgbDiagnosticsView.setPadding(dp(9), dp(8), dp(9), dp(8));
+        rgbDiagnosticsView.setBackgroundColor(PANEL);
+        rgbDiagnosticsView.setTextIsSelectable(true);
+        cameraBox.addView(rgbDiagnosticsView, matchWrap());
         depthStatus = text("D405 Depth 프레임을 기다리고 있습니다.", 12, MUTED, false); depthStatus.setPadding(0, dp(4), 0, 0); cameraBox.addView(depthStatus, matchWrap());
         streamButton = button("데이터 수집"); streamButton.setOnClickListener(v -> { if (streaming) stopRealSense(); else startRealSense(); });
         LinearLayout.LayoutParams streamLp = new LinearLayout.LayoutParams(-1, dp(50)); streamLp.topMargin = dp(8); cameraBox.addView(streamButton, streamLp);
@@ -222,7 +206,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         cameraBox.addView(exportButton, matchWrap());
         exportStatus = text("수집을 중지하고 저장이 끝나면 세션 전체를 ZIP으로 내보낼 수 있습니다.", 12, MUTED, false);
         cameraBox.addView(exportStatus, matchWrap());
-        TextView limitation = text("‘데이터 수집’ 버튼 하나로 휴대폰 IMU·RGB와 D405 Depth 수집 및 로컬 저장을 함께 시작·중지합니다. RGB와 Depth는 별도 센서이며 정렬·시각 대응은 unverified입니다. 중지 시 세션 전송 경계를 호출하지만 서버 API 미확정으로 현재 전송은 대기 처리됩니다.", 12, Color.rgb(255, 211, 117), false);
+        TextView limitation = text("‘데이터 수집’ 버튼 하나로 D405 RGB·Depth와 휴대폰 IMU 수집 및 로컬 저장을 함께 시작·중지합니다. RGB/Depth 픽셀 정렬과 시각 대응은 검증 전까지 unverified로 기록합니다. 중지 시 세션 전송 경계를 호출하지만 서버 API 미확정으로 현재 전송은 대기 처리됩니다.", 12, Color.rgb(255, 211, 117), false);
         limitation.setPadding(0, dp(8), 0, 0); cameraBox.addView(limitation, matchWrap());
         page.addView(cameraBox, new LinearLayout.LayoutParams(-1, -2));
 
@@ -312,118 +296,17 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
     private LinearLayout.LayoutParams matchWrap() { return new LinearLayout.LayoutParams(-1, -2); }
     private int dp(float value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
 
-    private void startPhoneCamera() {
-        if (!activityResumed) return;
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            if (!pendingPhoneCameraStart && !pendingRealSenseStart) {
-                pendingPhoneCameraStart = true;
-                requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
-            }
-            rgbStatus.setText("휴대폰 카메라 권한을 허용해 주세요.");
-            return;
-        }
-        if (phoneCameraBound) {
-            rgbStatus.setText("휴대폰 RGB 미리보기 연결됨" + (streaming ? " · 저장 " + persistedPhoneRgbCount + "장" : ""));
-            if (streaming && cameraConnected) startPhoneRgbCaptureLoop();
-            return;
-        }
-        if (phoneCameraStarting) return;
-        phoneCameraStarting = true;
-        rgbStatus.setText("휴대폰 카메라 시작 중…");
-        ListenableFuture<ProcessCameraProvider> providerFuture = ProcessCameraProvider.getInstance(this);
-        providerFuture.addListener(() -> {
-            try {
-                cameraProvider = providerFuture.get();
-                Preview preview = new Preview.Builder().build();
-                preview.setSurfaceProvider(rgbPreview.getSurfaceProvider());
-                int rotation = rgbPreview.getDisplay() == null ? 0 : rgbPreview.getDisplay().getRotation();
-                phoneImageCapture = new ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                        .setTargetRotation(rotation)
-                        .build();
-                cameraProvider.unbindAll();
-                cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, phoneImageCapture);
-                phoneCameraStarting = false;
-                phoneCameraBound = true;
-                rgbStatus.setText("휴대폰 후면 카메라 미리보기 연결됨" + (streaming ? " · 저장 " + persistedPhoneRgbCount + "장" : ""));
-                if (streaming && cameraConnected) startPhoneRgbCaptureLoop();
-            } catch (Exception error) {
-                phoneCameraStarting = false;
-                phoneCameraBound = false;
-                rgbStatus.setText("휴대폰 RGB 카메라를 열지 못했습니다: " + error.getMessage());
-            }
-        }, ContextCompat.getMainExecutor(this));
-    }
-
-    private void startPhoneRgbCaptureLoop() {
-        phoneRgbHandler.removeCallbacks(phoneRgbCaptureLoop);
-        if (activityResumed && streaming && cameraConnected && phoneCameraBound && phoneImageCapture != null)
-            phoneRgbHandler.postDelayed(phoneRgbCaptureLoop, 250);
-    }
-
-    private void capturePhoneRgb() {
-        if (!activityResumed || !streaming || !cameraConnected || !phoneCameraBound || phoneImageCapture == null || phoneRgbCaptureInFlight) return;
-        phoneRgbCaptureInFlight = true;
-        try {
-            phoneImageCapture.takePicture(saveExecutor, new ImageCapture.OnImageCapturedCallback() {
-                @Override public void onCaptureSuccess(ImageProxy image) {
-                    Bitmap decoded = null;
-                    Bitmap upright = null;
-                    try {
-                        ImageProxy.PlaneProxy[] planes = image.getPlanes();
-                        if (planes.length == 0) throw new IOException("휴대폰 카메라 JPEG 데이터가 비어 있습니다.");
-                        java.nio.ByteBuffer buffer = planes[0].getBuffer();
-                        byte[] jpeg = new byte[buffer.remaining()]; buffer.get(jpeg);
-                        decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
-                        if (decoded == null) throw new IOException("휴대폰 카메라 이미지를 디코딩하지 못했습니다.");
-                        int rotation = image.getImageInfo().getRotationDegrees();
-                        if (rotation != 0) {
-                            Matrix matrix = new Matrix(); matrix.postRotate(rotation);
-                            upright = Bitmap.createBitmap(decoded, 0, 0, decoded.getWidth(), decoded.getHeight(), matrix, true);
-                            if (upright != decoded) decoded.recycle();
-                        } else upright = decoded;
-                        CaptureSessionWriter writer = captureWriter;
-                        if (writer != null) {
-                            String calibrationId = "android_phone_back_intrinsics_unrecorded_" + upright.getWidth() + "x" + upright.getHeight();
-                            boolean stored = writer.writePhoneRgb(upright, image.getImageInfo().getTimestamp(), calibrationId);
-                            if (stored) runOnUiThread(() -> {
-                                persistedPhoneRgbCount++;
-                                rgbStatus.setText("휴대폰 후면 RGB 미리보기 연결됨 · 저장 " + persistedPhoneRgbCount + "장 · RGB/Depth 정렬 unverified");
-                            });
-                        }
-                    } catch (Exception error) {
-                        runOnUiThread(() -> rgbStatus.setText("휴대폰 RGB 저장 오류: " + error.getMessage()));
-                    } finally {
-                        if (upright != null && upright != decoded) upright.recycle();
-                        if (decoded != null && !decoded.isRecycled()) decoded.recycle();
-                        image.close();
-                        phoneRgbCaptureInFlight = false;
-                        phoneRgbHandler.postDelayed(phoneRgbCaptureLoop, 1000);
-                    }
-                }
-
-                @Override public void onError(ImageCaptureException error) {
-                    runOnUiThread(() -> rgbStatus.setText("휴대폰 RGB 캡처 오류: " + error.getMessage()));
-                    phoneRgbCaptureInFlight = false;
-                    phoneRgbHandler.postDelayed(phoneRgbCaptureLoop, 1000);
-                }
-            });
-        } catch (Exception error) {
-            phoneRgbCaptureInFlight = false;
-            rgbStatus.setText("휴대폰 RGB 캡처를 시작하지 못했습니다: " + error.getMessage());
-            phoneRgbHandler.postDelayed(phoneRgbCaptureLoop, 1000);
-        }
-    }
-
     private void startRealSense() {
         if (depthCameraAdapter instanceof RealSenseDepthCameraAdapter && !((RealSenseDepthCameraAdapter) depthCameraAdapter).isSdkAvailable()) {
             cameraStatus.setText("RealSense Android SDK가 앱에 포함되지 않았습니다. librealsense.aar를 android-app/app/libs에 넣고 다시 빌드하세요.");
             return;
         }
+        // Keep the 0.4.0 SDK startup gate. The RealSense Android wrapper handles
+        // USB device enumeration/permission after its context is initialized.
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             pendingRealSenseStart = true;
             requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
-            cameraStatus.setText("RealSense USB 권한을 위해 Android 카메라 접근 권한을 요청합니다.");
+            cameraStatus.setText("RealSense SDK 시작을 위해 Android 카메라 접근 권한을 허용해 주세요.");
             return;
         }
         UsbManager manager = (UsbManager) getSystemService(Context.USB_SERVICE);
@@ -442,7 +325,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
             activeSessionDirectory = new File(new File(documents, "sessions"), sessionId);
             if (!activeSessionDirectory.mkdirs() && !activeSessionDirectory.isDirectory()) throw new IOException("세션 폴더를 만들 수 없습니다.");
             captureWriter = new CaptureSessionWriter(activeSessionDirectory, sessionId);
-            persistedFrameCount = 0; persistedPhoneRgbCount = 0; lastPersistedFrameMs = 0; streaming = true;
+            persistedFrameCount = 0; persistedRgbCount = 0; lastPersistedFrameMs = 0; streaming = true;
             updateExportButton();
             streamButton.setText("데이터 수집 중지");
             cameraStatus.setText("USB 장치 확인됨 · RealSense SDK 스트림 여는 중…");
@@ -450,11 +333,14 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                 @Override public void onStatus(String status) {
                     runOnUiThread(() -> cameraStatus.setText(status));
                 }
+                @Override public void onRgbDiagnostic(String diagnostic) {
+                    runOnUiThread(() -> rgbDiagnosticsView.setText(diagnostic));
+                }
                 @Override public void onConnected(String vendor, String model, String firmware, String sdkVersion) {
                     runOnUiThread(() -> {
                         cameraConnected = true;
                         cameraStatus.setText(vendor + " " + model + " · FW " + (firmware == null ? "확인 불가" : firmware) + " · SDK " + sdkVersion);
-                        startPhoneRgbCaptureLoop();
+                        rgbStatus.setText("D405 RGB/Depth 스트림 연결됨 · 첫 프레임 대기 중");
                         if (usbInfoView != null) refreshUsbDevices();
                     });
                 }
@@ -462,6 +348,11 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                     runOnUiThread(() -> {
                         if (!streaming) return;
                         depthPreview.setImageBitmap(frame.depthPreview);
+                        if (frame.rgbPreview != null) {
+                            rgbPreview.setImageBitmap(frame.rgbPreview);
+                            rgbStatus.setText("D405 RGB 미리보기 · " + frame.rgbPreview.getWidth() + "×" + frame.rgbPreview.getHeight()
+                                    + " · 저장 " + persistedRgbCount + "장 · Depth 정렬 unverified");
+                        } else rgbStatus.setText("D405 RGB 프레임을 받지 못했습니다. Depth 미리보기는 계속됩니다.");
                         int validCount = 0; for (boolean valid : frame.validMask) if (valid) validCount++;
                         float center = frame.depthMeters[(frame.height / 2) * frame.width + frame.width / 2];
                         depthStatus.setText(String.format(Locale.US, "%s · %d×%d · 중심 Depth %.3f m · 유효 %.1f%% · 저장 %d프레임",
@@ -471,7 +362,11 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                         if (writer != null && now - lastPersistedFrameMs >= 1000) {
                             lastPersistedFrameMs = now;
                             saveExecutor.execute(() -> {
-                                try { writer.writeDepth(frame); persistedFrameCount++; }
+                                try {
+                                    boolean rgbSaved = writer.writeDepth(frame);
+                                    persistedFrameCount++;
+                                    if (rgbSaved) persistedRgbCount++;
+                                }
                                 catch (Exception e) { runOnUiThread(() -> depthStatus.setText("세션 저장 오류: " + e.getMessage())); }
                             });
                         }
@@ -500,7 +395,6 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         if (!streaming && captureWriter == null) return;
         streaming = false;
         cameraConnected = false;
-        phoneRgbHandler.removeCallbacks(phoneRgbCaptureLoop);
         depthCameraAdapter.disconnect();
         if (imuRecording) stopImuRecording();
         CaptureSessionWriter writer = captureWriter; captureWriter = null;
@@ -547,7 +441,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         UsbManager manager = (UsbManager) getSystemService(Context.USB_SERVICE);
         Map<String, UsbDevice> devices = manager == null ? Collections.emptyMap() : manager.getDeviceList();
         if (devices.isEmpty()) {
-            usbInfoView.setText("USB 장치가 검색되지 않았습니다. USB OTG 연결과 전원을 확인한 뒤 다시 검색하세요.\n\nD405 Depth 스트림: SDK 연결 전 · 휴대폰 RGB 카메라: 별도 사용");
+            usbInfoView.setText("USB 장치가 검색되지 않았습니다. USB OTG 연결과 전원을 확인한 뒤 다시 검색하세요.\n\nD405 RGB/Depth 스트림: SDK 연결 전");
             return;
         }
         StringBuilder info = new StringBuilder();
@@ -719,14 +613,12 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         errorView.setText(reason); errorView.setTextColor(Color.rgb(255, 211, 117));
     }
 
-    @Override protected void onResume() { super.onResume(); activityResumed = true; refreshUsbDevices(); startPhoneCamera(); }
+    @Override protected void onResume() { super.onResume(); refreshUsbDevices(); }
     // USB permission UI can temporarily pause this Activity. Keep the pending SDK
     // connection alive; the user can stop explicitly or onDestroy will clean up.
-    @Override protected void onPause() { activityResumed = false; phoneRgbHandler.removeCallbacks(phoneRgbCaptureLoop); super.onPause(); }
+    @Override protected void onPause() { super.onPause(); }
     @Override protected void onDestroy() {
         stopRealSense();
-        phoneRgbHandler.removeCallbacks(phoneRgbCaptureLoop);
-        if (cameraProvider != null) cameraProvider.unbindAll();
         if (saveExecutor != null) { saveExecutor.shutdown(); saveExecutor = null; }
         super.onDestroy();
     }
@@ -735,16 +627,12 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == CAMERA_PERMISSION_REQUEST) {
             boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
-            pendingPhoneCameraStart = false;
             boolean startDepth = pendingRealSenseStart;
             pendingRealSenseStart = false;
-            if (granted) {
-                startPhoneCamera();
-                if (startDepth) startRealSense();
-            } else {
-                rgbStatus.setText("휴대폰 RGB 카메라 권한이 거부되었습니다.");
-                if (startDepth) cameraStatus.setText("RealSense USB 사용을 위한 카메라 접근 권한이 거부되었습니다.");
-            }
+            if (granted && startDepth) startRealSense();
+            else if (!granted && startDepth)
+                cameraStatus.setText("Android 카메라 접근 권한이 거부되어 RealSense SDK를 시작하지 않았습니다.");
         }
     }
+
 }

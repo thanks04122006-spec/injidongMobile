@@ -27,6 +27,7 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
     private ExecutorService worker;
     private Object context, pipeline, config;
     private Listener listener;
+    private String lastRgbDiagnostic;
 
     public RealSenseDepthCameraAdapter(Context context) { this.appContext = context.getApplicationContext(); }
     @Override public String name() { return "Intel RealSense SDK 2.0 Android wrapper"; }
@@ -44,6 +45,9 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
             return;
         }
         running.set(true);
+        lastRgbDiagnostic = null;
+        postRgbDiagnostic("USB 장치 확인됨 · VID:PID " + String.format(Locale.US, "%04X:%04X", usb.getVendorId(), usb.getProductId())
+                + " · SDK 초기화 중");
         worker = Executors.newSingleThreadExecutor(r -> { Thread t = new Thread(r, "realsense-stream"); t.setDaemon(true); return t; });
         worker.execute(() -> stream(usb));
     }
@@ -66,31 +70,83 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
             context.getClass().getMethod("setDevicesChangedCallback", deviceListener).invoke(context, callback);
             UsbManager usbManager = (UsbManager) appContext.getSystemService(Context.USB_SERVICE);
             boolean hasPermission = usbManager != null && usbManager.hasPermission(usb);
+            postRgbDiagnostic("USB 장치 확인됨 · VID:PID " + String.format(Locale.US, "%04X:%04X", usb.getVendorId(), usb.getProductId())
+                    + " · Android USB 권한 " + (hasPermission ? "허용됨" : "없음/SDK 응답 대기") + "\nSDK 장치 목록 확인 중");
             postStatus(hasPermission
                     ? "Android USB 권한 허용됨 · SDK 장치 등록 확인 중…"
                     : "USB 장치는 확인됨 · Android USB 권한 응답 대기 중…");
             Log.i(TAG, "USB permission=" + hasPermission + ", waiting for SDK device enumeration");
             awaitSdkDevice(usb, 60_000);
-            postStatus("SDK 장치 확인됨 · D405 Depth 프로파일 설정 중…");
+            postStatus("SDK 장치 확인됨 · D405 RGB/Depth 프로파일 설정 중…");
             pipeline = Class.forName(SDK + "Pipeline").getConstructor().newInstance();
             config = Class.forName(SDK + "Config").getConstructor().newInstance();
             Class<?> streamType = Class.forName(SDK + "StreamType");
             Class<?> streamFormat = Class.forName(SDK + "StreamFormat");
             Object depth = enumValue(streamType, "DEPTH");
+            Object color = enumValue(streamType, "COLOR");
             Object z16 = enumValue(streamFormat, "Z16");
+            Object rgb8 = enumValue(streamFormat, "RGB8");
             Method enable = config.getClass().getMethod("enableStream", streamType, int.class, int.class, int.class, streamFormat, int.class);
-            enable.invoke(config, depth, -1, 640, 480, z16, 30);
-            postStatus("SDK 장치 확인됨 · D405 Depth 스트림 시작 중…");
-            Log.i(TAG, "Starting pipeline: depth Z16 640x480@30; RGB comes from the Android phone camera");
-            Object profile = pipeline.getClass().getMethod("start", config.getClass()).invoke(pipeline, config);
+            int[][] profileCandidates = {
+                    {640, 480, 640, 480, 15},
+                    {640, 480, 848, 480, 15},
+                    {848, 480, 848, 480, 15},
+                    {640, 480, 640, 480, 30},
+                    {848, 480, 848, 480, 30},
+                    {640, 480, 848, 480, 30}
+            };
+            StringBuilder candidateFailures = new StringBuilder();
+            Object profile = null;
+            boolean colorEnabled = false;
+            String selectedRgbProfile = null;
+            for (int i = 0; i < profileCandidates.length && running.get(); i++) {
+                int[] candidate = profileCandidates[i];
+                String candidateName = "Depth " + candidate[0] + "×" + candidate[1] + " Z16@" + candidate[4]
+                        + " + RGB " + candidate[2] + "×" + candidate[3] + " RGB8@" + candidate[4];
+                postRgbDiagnostic("D405 RGB·Depth 프로파일 후보 " + (i + 1) + "/" + profileCandidates.length + " 확인 중\n" + candidateName);
+                closeQuietly(config);
+                config = Class.forName(SDK + "Config").getConstructor().newInstance();
+                try {
+                    enable.invoke(config, depth, -1, candidate[0], candidate[1], z16, candidate[4]);
+                    enable.invoke(config, color, -1, candidate[2], candidate[3], rgb8, candidate[4]);
+                    boolean canResolve = (boolean) config.getClass().getMethod("canResolve", pipeline.getClass()).invoke(config, pipeline);
+                    if (!canResolve) throw new IllegalStateException("SDK canResolve=false");
+                    postStatus("SDK 장치 확인됨 · RGB·Depth 스트림 시작 중…");
+                    profile = pipeline.getClass().getMethod("start", config.getClass()).invoke(pipeline, config);
+                    colorEnabled = true;
+                    selectedRgbProfile = candidateName;
+                    Log.i(TAG, "Started D405 RGB/Depth profile: " + candidateName);
+                    break;
+                } catch (Throwable candidateError) {
+                    String reason = rootMessage(candidateError);
+                    if (candidateFailures.length() > 0) candidateFailures.append("\n");
+                    candidateFailures.append(candidateName).append(" → ").append(reason);
+                    Log.w(TAG, "D405 RGB/Depth profile rejected: " + candidateName + " / " + reason, candidateError);
+                    try { pipeline.getClass().getMethod("stop").invoke(pipeline); } catch (Throwable ignored) { }
+                    closeQuietly(pipeline);
+                    pipeline = Class.forName(SDK + "Pipeline").getConstructor().newInstance();
+                }
+            }
+            if (!colorEnabled) {
+                postStatus("RGB 프로파일을 사용할 수 없음 · Depth 전용 스트림 시작 중…");
+                closeQuietly(config);
+                pipeline = Class.forName(SDK + "Pipeline").getConstructor().newInstance();
+                config = Class.forName(SDK + "Config").getConstructor().newInstance();
+                enable.invoke(config, depth, -1, 640, 480, z16, 30);
+                profile = pipeline.getClass().getMethod("start", config.getClass()).invoke(pipeline, config);
+            }
             closeQuietly(profile);
 
             String sdkVersion = (String) rsContext.getMethod("getVersion").invoke(null);
             String serial = readDeviceInfo(usb, "SERIAL_NUMBER");
             String firmware = readDeviceInfo(usb, "FIRMWARE_VERSION");
-            postStatus("D405 Depth 연결됨 · 첫 프레임 대기 중…");
-            Log.i(TAG, "Depth pipeline started; waiting for frames");
+            Log.i(TAG, colorEnabled ? "RGB/Depth pipeline started; waiting for frames" : "Depth-only fallback pipeline started");
             postConnected("Intel", "RealSense D405", firmware, sdkVersion);
+            postStatus(colorEnabled ? "D405 RGB/Depth 연결됨 · 첫 프레임 대기 중…"
+                    : "D405 Depth 연결됨 · RGB 프로파일을 열지 못해 Depth 미리보기만 사용 중");
+            if (colorEnabled) postRgbDiagnostic("RGB+Depth 프로파일 시작 성공\n선택: " + selectedRgbProfile + "\n실제 프레임 정보 수신 대기 중");
+            else postRgbDiagnostic("Depth 전용 연결 성공 · 지원되는 RGB·Depth 조합을 찾지 못했습니다.\n시도 결과:\n"
+                    + (candidateFailures.length() == 0 ? "시도되지 않음" : candidateFailures));
 
             Class<?> streamTypeClass = streamType;
             long lastUiFrameMs = 0;
@@ -101,13 +157,22 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
                     if (nowMs - lastUiFrameMs < 200) continue; // bound conversion/bitmap allocations to 5 previews per second
                     lastUiFrameMs = nowMs;
                     Object depthFrame = frames.getClass().getMethod("first", streamTypeClass).invoke(frames, depth);
+                    Object colorFrame = colorEnabled
+                            ? frames.getClass().getMethod("first", streamTypeClass).invoke(frames, color) : null;
                     if (depthFrame == null) throw new IllegalStateException("D405 Depth 프레임이 FrameSet에 없습니다.");
-                    try { deliverFrame(depthFrame, serial, firmware, sdkVersion); }
-                    finally { closeQuietly(depthFrame); }
+                    if (colorEnabled && colorFrame == null)
+                        postRgbDiagnostic("Depth 프레임 수신 중 · 같은 FrameSet에 COLOR 프레임 없음\n선택 프로파일: " + selectedRgbProfile
+                                + "\n가능 원인: 프로파일 누락, USB 대역폭·전원, SDK FrameSet 구성");
+                    try { deliverFrame(depthFrame, colorFrame, serial, firmware, sdkVersion); }
+                    finally { closeQuietly(depthFrame); closeQuietly(colorFrame); }
                 } finally { closeQuietly(frames); }
             }
         } catch (Throwable error) {
-            if (running.get()) postError("REALSENSE_STREAM_FAILED", rootMessage(error));
+            if (running.get()) {
+                postError("REALSENSE_STREAM_FAILED", rootMessage(error));
+                postRgbDiagnostic("SDK/스트림 오류 · " + rootMessage(error)
+                        + "\n확인: USB 권한, SDK 장치 검색, D405 지원 프로파일, OTG 전원");
+            }
         } finally {
             running.set(false);
             closeQuietly(config); config = null;
@@ -126,6 +191,7 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
             finally { closeQuietly(devices); }
                     if (count > 0) {
                         Log.i(TAG, "SDK enumerated " + count + " Intel device(s)");
+                        postRgbDiagnostic("SDK 장치 검색 성공 · Intel 장치 " + count + "개\nRGB/Depth 프로파일 설정으로 진행");
                         return;
                     }
                     if ((android.os.SystemClock.elapsedRealtime() + 300) % 3000 < 300) {
@@ -134,6 +200,9 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
                         postStatus(manager != null && manager.hasPermission(usb)
                                 ? "USB 권한 허용됨 · SDK 장치 등록 대기 중…"
                                 : "Android USB 권한 응답 대기 중…");
+                        postRgbDiagnostic("SDK 장치 검색 결과 0개 · USB 권한 "
+                                + (manager != null && manager.hasPermission(usb) ? "허용됨" : "없음")
+                                + "\n가능 원인: SDK USB 등록 지연, Android USB 권한, OTG/전원 또는 SDK 장치 검색 실패");
                     }
             Thread.sleep(300); // the first attach notification precedes the Android USB permission response
         }
@@ -147,7 +216,7 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
         throw new IllegalStateException("RealSense USB 장치가 연결 해제되었습니다.");
     }
 
-    private void deliverFrame(Object depthFrame, String serial, String firmware, String sdkVersion) throws Exception {
+    private void deliverFrame(Object depthFrame, Object colorFrame, String serial, String firmware, String sdkVersion) throws Exception {
         Object videoExt = enumValue(Class.forName(SDK + "Extension"), "VIDEO_FRAME");
         Object depthExt = enumValue(Class.forName(SDK + "Extension"), "DEPTH_FRAME");
         Object typedDepth = depthFrame.getClass().getMethod("as", Class.forName(SDK + "Extension")).invoke(depthFrame, depthExt);
@@ -164,6 +233,35 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
         float[] depthMeters = new float[pixelCount];
         boolean[] valid = new boolean[pixelCount];
         rectifyDepth(z16, depthStride, width, height, scale, intrinsics, depthMeters, valid);
+        Bitmap rgbBitmap = null;
+        long rgbTimestampNs = 0L;
+        String rgbDomainName = null;
+        if (colorFrame != null) {
+            Object videoColor = null;
+            try {
+                videoColor = colorFrame.getClass().getMethod("as", Class.forName(SDK + "Extension"))
+                        .invoke(colorFrame, videoExt);
+                int colorWidth = (int) videoColor.getClass().getMethod("getWidth").invoke(videoColor);
+                int colorHeight = (int) videoColor.getClass().getMethod("getHeight").invoke(videoColor);
+                int colorStride = (int) videoColor.getClass().getMethod("getStride").invoke(videoColor);
+                byte[] colorBytes = readBytes(colorFrame);
+                rgbBitmap = rgb8ToBitmap(colorBytes, colorStride, colorWidth, colorHeight);
+                rgbTimestampNs = Math.round(((double) colorFrame.getClass().getMethod("getTimestamp").invoke(colorFrame)) * 1_000_000d);
+                Object rgbDomain = colorFrame.getClass().getMethod("getTimestampDomain").invoke(colorFrame);
+                rgbDomainName = "realsense_" + rgbDomain.toString().toLowerCase(Locale.US);
+                postRgbDiagnostic("RGB 프레임 수신·변환 성공 · " + colorWidth + "×" + colorHeight + " RGB8"
+                        + " · stride " + colorStride + " B · 버퍼 " + colorBytes.length + " B\n시각 "
+                        + String.format(Locale.US, "%.3f ms", (double) colorFrame.getClass().getMethod("getTimestamp").invoke(colorFrame))
+                        + " · clock " + rgbDomainName + "\nDepth 픽셀 정렬·시각 대응은 미검증");
+            } catch (Throwable rgbError) {
+                Log.e(TAG, "D405 RGB conversion failed; continuing with Depth", rgbError);
+                postStatus("Depth 미리보기 수신 중 · D405 RGB 변환 오류: " + rootMessage(rgbError));
+                postRgbDiagnostic("COLOR 프레임은 도착했지만 RGB 변환 실패\n원인: " + rootMessage(rgbError)
+                        + "\n확인: 픽셀 포맷, 크기, stride, 버퍼 크기, SDK API 호환성");
+            } finally {
+                closeQuietly(videoColor);
+            }
+        }
         Bitmap depthBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         int[] depthPixels = new int[pixelCount];
         for (int i = 0; i < pixelCount; i++) depthPixels[i] = valid[i] ? depthColor(depthMeters[i]) : Color.BLACK;
@@ -179,11 +277,27 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
         CameraFrame frame = new CameraFrame(frameId, Math.round(timestampMs * 1_000_000d), domainName,
                 width, height, depthStride, intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy, scale,
                 calibrationId, firmware, sdkVersion, serial,
-                z16, depthMeters, valid, depthBitmap);
+                z16, depthMeters, valid, depthBitmap, rgbBitmap, rgbTimestampNs, rgbDomainName);
         Listener current = listener;
         if (current != null && running.get()) current.onFrame(frame);
-        else depthBitmap.recycle();
+        else { depthBitmap.recycle(); if (rgbBitmap != null) rgbBitmap.recycle(); }
         closeQuietly(typedDepth); closeQuietly(videoDepth);
+    }
+
+    private static Bitmap rgb8ToBitmap(byte[] data, int stride, int width, int height) {
+        if (width <= 0 || height <= 0 || stride < width * 3 || data.length < stride * height)
+            throw new IllegalStateException("D405 RGB profile의 크기·stride·버퍼 길이가 올바르지 않습니다.");
+        int[] pixels = new int[Math.multiplyExact(width, height)];
+        for (int y = 0; y < height; y++) {
+            int row = y * stride;
+            for (int x = 0; x < width; x++) {
+                int offset = row + x * 3;
+                pixels[y * width + x] = Color.rgb(data[offset] & 255, data[offset + 1] & 255, data[offset + 2] & 255);
+            }
+        }
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        bitmap.setPixels(pixels, 0, width, 0, 0, width, height);
+        return bitmap;
     }
 
     private static byte[] readBytes(Object frame) throws Exception {
@@ -287,6 +401,12 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
         Listener l = listener; if (l != null) l.onConnected(vendor, model, firmware, sdk);
     }
     private void postStatus(String status) { Listener l = listener; if (l != null && running.get()) l.onStatus(status); }
+    private void postRgbDiagnostic(String diagnostic) {
+        if (diagnostic == null || diagnostic.equals(lastRgbDiagnostic)) return;
+        lastRgbDiagnostic = diagnostic;
+        Listener l = listener;
+        if (l != null && running.get()) l.onRgbDiagnostic(diagnostic);
+    }
     private void postError(String code, String message) {
         Log.e(TAG, code + ": " + message);
         Listener l = listener; if (l != null) l.onError(code, message);

@@ -22,7 +22,6 @@ final class CaptureSessionWriter implements AutoCloseable {
     private final File root;
     private final String sessionId;
     private final BufferedWriter frames, images;
-    private String lastWrittenDepthFrameId;
     private int rgbImageCount;
     private int depthFrameCount;
 
@@ -34,7 +33,7 @@ final class CaptureSessionWriter implements AutoCloseable {
         mkdir(new File(root, "raw")); mkdir(new File(root, "rgb"));
     }
 
-    synchronized void writeDepth(DepthCameraAdapter.CameraFrame frame) throws Exception {
+    synchronized boolean writeDepth(DepthCameraAdapter.CameraFrame frame) throws Exception {
         File frameDir = new File(root, frame.frameId);
         mkdir(frameDir);
         File raw = new File(new File(root, "raw"), frame.frameId + "_depth_z16.bin");
@@ -52,21 +51,21 @@ final class CaptureSessionWriter implements AutoCloseable {
         frameRow.put("frame_id", frame.frameId); frameRow.put("metadata_path", relative(new File(frameDir, "metadata.json")));
         frames.write(frameRow.toString()); frames.newLine(); frames.flush();
 
-        lastWrittenDepthFrameId = frame.frameId;
         depthFrameCount++;
+        return writeD405Rgb(frame);
     }
 
     synchronized void writeSessionSummary(String status, long imuSampleCount) throws Exception {
         JSONObject session = new JSONObject();
         session.put("manifest_version", "1.0.0"); session.put("session_id", sessionId); session.put("status", status);
-        JSONObject sources = new JSONObject(); sources.put("rgb", "android_phone_back_camera");
+        JSONObject sources = new JSONObject(); sources.put("rgb", "intel_realsense_d405_color");
         sources.put("depth", "intel_realsense_d405"); sources.put("imu", "android_phone_sensors");
         session.put("sources", sources);
         JSONObject counts = new JSONObject(); counts.put("depth_frames", depthFrameCount);
-        counts.put("phone_rgb_images", rgbImageCount); counts.put("imu_samples", imuSampleCount);
+        counts.put("rgb_images", rgbImageCount); counts.put("imu_samples", imuSampleCount);
         session.put("counts", counts);
         JSONObject files = new JSONObject(); files.put("depth_index", "frames.jsonl");
-        files.put("images_index", "images.jsonl"); files.put("phone_rgb_images", "rgb/");
+        files.put("images_index", "images.jsonl"); files.put("rgb_images", "rgb/");
         files.put("imu_samples", "imu.jsonl"); files.put("depth_arrays", "<frame_id>/arrays.npz");
         files.put("raw_depth", "raw/"); session.put("files", files);
         JSONObject alignment = new JSONObject(); alignment.put("status", "unverified");
@@ -78,19 +77,23 @@ final class CaptureSessionWriter implements AutoCloseable {
         writeText(new File(root, "session.json"), session.toString(2));
     }
 
-    synchronized boolean writePhoneRgb(Bitmap bitmap, long captureTimeNs, String calibrationId) throws Exception {
-        if (lastWrittenDepthFrameId == null) return false;
-        String imageId = String.format(Locale.US, "phone_rgb_%06d", ++rgbImageCount);
+    private synchronized boolean writeD405Rgb(DepthCameraAdapter.CameraFrame frame) throws Exception {
+        Bitmap bitmap = frame.rgbPreview;
+        if (bitmap == null) return false;
+        String imageId = String.format(Locale.US, "d405_rgb_%06d", ++rgbImageCount);
         File image = new File(new File(root, "rgb"), imageId + ".png");
         writePng(bitmap, image);
         JSONObject rgb = new JSONObject();
-        rgb.put("frame_id", lastWrittenDepthFrameId); rgb.put("session_id", sessionId); rgb.put("file", relative(image));
+        rgb.put("frame_id", frame.frameId); rgb.put("session_id", sessionId); rgb.put("file", relative(image));
         rgb.put("sha256", sha256(image)); rgb.put("width", bitmap.getWidth()); rgb.put("height", bitmap.getHeight());
         rgb.put("encoding", "RGB8"); rgb.put("image_kind", "original_rgb");
-        JSONObject time = new JSONObject(); time.put("ns", Long.toString(captureTimeNs));
-        time.put("clock_domain", "android_camera_sensor"); time.put("origin", "sensor"); rgb.put("time", time);
+        JSONObject time = new JSONObject();
+        boolean hasRgbTime = frame.rgbCaptureTimeNs > 0 && frame.rgbClockDomain != null;
+        time.put("ns", hasRgbTime ? Long.toString(frame.rgbCaptureTimeNs) : JSONObject.NULL);
+        time.put("clock_domain", hasRgbTime ? frame.rgbClockDomain : JSONObject.NULL);
+        time.put("origin", hasRgbTime ? "sensor" : JSONObject.NULL); rgb.put("time", time);
         rgb.put("pair_status", "unverified"); rgb.put("pair_evidence", JSONObject.NULL);
-        rgb.put("aligned_to_depth", false); rgb.put("alignment_method", JSONObject.NULL); rgb.put("calibration_id", calibrationId);
+        rgb.put("aligned_to_depth", false); rgb.put("alignment_method", JSONObject.NULL); rgb.put("calibration_id", JSONObject.NULL);
         rgb.put("provenance_kind", "real"); images.write(rgb.toString()); images.newLine(); images.flush();
         return true;
     }
@@ -121,7 +124,7 @@ final class CaptureSessionWriter implements AutoCloseable {
         JSONObject sync = new JSONObject(); sync.put("status", "unverified"); sync.put("offset_ns", JSONObject.NULL);
         sync.put("uncertainty_ns", JSONObject.NULL); sync.put("tolerance_ns", JSONObject.NULL); sync.put("evidence", JSONObject.NULL); m.put("sync", sync);
         JSONObject conditions = new JSONObject(); conditions.put("camera_distance_m", JSONObject.NULL); conditions.put("lighting", JSONObject.NULL);
-        conditions.put("material", JSONObject.NULL); conditions.put("notes", "Depth arrays.npz is rectified to pinhole pixels with nearest-neighbor remapping when source distortion is BROWN_CONRADY; original Z16 is retained unchanged under raw/. Source distortion model and coefficients are encoded in calibration_id. RGB is captured separately from the Android phone camera; phone intrinsics, RGB/Depth alignment, and cross-stream timestamp pairing are unverified."); m.put("capture_conditions", conditions);
+        conditions.put("material", JSONObject.NULL); conditions.put("notes", "Depth arrays.npz is rectified to pinhole pixels with nearest-neighbor remapping when source distortion is BROWN_CONRADY; original Z16 is retained unchanged under raw/. Source distortion model and coefficients are encoded in calibration_id. D405 RGB and Depth are read from the same SDK frameset; RGB/Depth pixel alignment and cross-stream timestamp correspondence remain unverified."); m.put("capture_conditions", conditions);
         m.put("target_mask_info", JSONObject.NULL); m.put("support_plane", JSONObject.NULL); m.put("volume_request", JSONObject.NULL);
         return m;
     }
