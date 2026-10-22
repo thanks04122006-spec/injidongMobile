@@ -4,7 +4,6 @@ import android.graphics.Bitmap;
 import org.json.JSONObject;
 import java.io.BufferedOutputStream;
 import java.io.BufferedWriter;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.OutputStreamWriter;

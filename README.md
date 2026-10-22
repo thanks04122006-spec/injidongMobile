@@ -28,7 +28,7 @@ D405 RGB와 Depth는 같은 SDK 프레임 세트에서 받습니다. 별도 미�
 | Android Gradle Plugin | 8.7.3 |
 | Gradle Wrapper | 8.9 |
 | `minSdk` / `targetSdk` | 24 / 35 |
-| 앱 버전 / 빌드 번호 | 0.5.0 / 4 |
+| 앱 버전 / 빌드 번호 | 0.5.1 / 5 |
 
 RealSense Android wrapper AAR는 `app/libs/librealsense.aar`에 포함되어 있습니다. 앱을 빌드하는 데 NDK와 CMake를 별도로 설치할 필요는 없습니다. AAR를 소스에서 다시 빌드할 때만 NDK `28.0.13004108`과 CMake `3.22.1`이 필요합니다.
 

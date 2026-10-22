@@ -7,16 +7,15 @@ android {
         applicationId 'com.injidong.measurement'
         minSdk 24
         targetSdk 35
-        versionCode 4
-        versionName '0.5.0'
+        versionCode 5
+        versionName '0.5.1'
     }
 }
 
 dependencies {
+    // Align transitive Kotlin libraries after removing the unused CameraX dependencies.
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
     implementation 'androidx.activity:activity:1.9.3'
-    implementation 'androidx.camera:camera-camera2:1.4.2'
-    implementation 'androidx.camera:camera-lifecycle:1.4.2'
-    implementation 'androidx.camera:camera-view:1.4.2'
     // Optional official RealSense Android wrapper: place a source-built librealsense.aar here.
     if (file('libs/librealsense.aar').exists()) {
         implementation files('libs/librealsense.aar')

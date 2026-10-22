@@ -9,7 +9,6 @@ import android.os.Build;
 import android.os.Environment;
 import android.content.pm.PackageManager;
 import android.view.Gravity;
-import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
