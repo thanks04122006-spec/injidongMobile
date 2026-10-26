@@ -46,6 +46,7 @@ final class CaptureSessionWriter implements AutoCloseable {
         writeText(metadataFile, metadata.toString(2));
         writeRawCaptureEvidence(frame, new File(frameDir, "raw_capture.json"),
                 metadataFile, rawRel, rawHash);
+        writeRgbDepthEvidence(frame, frameDir);
         JSONObject frameRow = new JSONObject();
         frameRow.put("frame_id", frame.frameId); frameRow.put("metadata_path", relative(new File(frameDir, "metadata.json")));
         frames.write(frameRow.toString()); frames.newLine(); frames.flush();
@@ -128,6 +129,27 @@ final class CaptureSessionWriter implements AutoCloseable {
         return m;
     }
 
+    private void writeRgbDepthEvidence(DepthCameraAdapter.CameraFrame f, File frameDir) throws Exception {
+        JSONObject evidence = new JSONObject();
+        evidence.put("format", "mobile-rgb-depth-evidence-v1");
+        evidence.put("session_id", sessionId); evidence.put("frame_id", f.frameId);
+        evidence.put("depth_calibration_id", f.calibrationId);
+        evidence.put("alignment_status", "unverified");
+        evidence.put("pair_status", "unverified");
+        evidence.put("depth_time_ns", Long.toString(f.captureTimeNs));
+        evidence.put("depth_clock_domain", f.clockDomain);
+        boolean hasRgbTime = f.rgbPreview != null && f.rgbCaptureTimeNs > 0 && f.rgbClockDomain != null;
+        evidence.put("rgb_time_ns", hasRgbTime ? Long.toString(f.rgbCaptureTimeNs) : JSONObject.NULL);
+        evidence.put("rgb_clock_domain", hasRgbTime ? f.rgbClockDomain : JSONObject.NULL);
+        boolean comparable = hasRgbTime && f.rgbClockDomain.equals(f.clockDomain);
+        evidence.put("rgb_minus_depth_ns", comparable
+                ? Long.toString(Math.subtractExact(f.rgbCaptureTimeNs, f.captureTimeNs)) : JSONObject.NULL);
+        evidence.put("calibration_status", f.rgbDepthCalibrationJson == null ? "unavailable" : "captured");
+        evidence.put("calibration", f.rgbDepthCalibrationJson == null
+                ? JSONObject.NULL : new JSONObject(f.rgbDepthCalibrationJson));
+        writeText(new File(frameDir, "rgb_depth_evidence.json"), evidence.toString(2));
+    }
+
     /** App-specific evidence sidecar; not part of the FramePacket v1.0.0 schema. */
     private void writeRawCaptureEvidence(DepthCameraAdapter.CameraFrame f, File file,
                                          File metadataFile, String rawRel, String rawHash) throws Exception {
@@ -171,7 +193,15 @@ final class CaptureSessionWriter implements AutoCloseable {
     private void writeRawZ16(DepthCameraAdapter.CameraFrame f, File file) throws Exception {
         try (BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(file))) { out.write(f.rawDepthZ16); }
     }
-    private void writePng(Bitmap bitmap, File file) throws Exception { try (FileOutputStream out = new FileOutputStream(file)) { if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) throw new java.io.IOException("PNG 인코딩 실패"); } }
+    private void writePng(Bitmap bitmap, File file) throws Exception {
+        if (bitmap.hasAlpha())
+            throw new java.io.IOException("RGB8 저장에는 알파 채널이 없는 Bitmap이 필요합니다.");
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out))
+                throw new java.io.IOException("PNG 인코딩 실패");
+        }
+        RgbPngValidator.validate(file, bitmap.getWidth(), bitmap.getHeight());
+    }
     private static BufferedWriter writer(File file) throws Exception { return new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file, true), StandardCharsets.UTF_8)); }
     private static void writeText(File f, String s) throws Exception { try (OutputStreamWriter w = new OutputStreamWriter(new FileOutputStream(f), StandardCharsets.UTF_8)) { w.write(s); } }
     private static void mkdir(File d) throws Exception { if (!d.mkdirs() && !d.isDirectory()) throw new java.io.IOException("폴더 생성 실패: " + d); }

@@ -234,6 +234,7 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
         Bitmap rgbBitmap = null;
         long rgbTimestampNs = 0L;
         String rgbDomainName = null;
+        String rgbDepthCalibrationJson = null;
         if (colorFrame != null) {
             Object videoColor = null;
             try {
@@ -247,6 +248,11 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
                 rgbTimestampNs = Math.round(((double) colorFrame.getClass().getMethod("getTimestamp").invoke(colorFrame)) * 1_000_000d);
                 Object rgbDomain = colorFrame.getClass().getMethod("getTimestampDomain").invoke(colorFrame);
                 rgbDomainName = "realsense_" + rgbDomain.toString().toLowerCase(Locale.US);
+                try {
+                    rgbDepthCalibrationJson = readRgbDepthCalibration(videoDepth, videoColor);
+                } catch (Exception calibrationError) {
+                    Log.w(TAG, "RGB/Depth calibration unavailable; retaining unverified capture", calibrationError);
+                }
                 postRgbDiagnostic("RGB 프레임 수신·변환 성공 · " + colorWidth + "×" + colorHeight + " RGB8"
                         + " · stride " + colorStride + " B · 버퍼 " + colorBytes.length + " B\n시각 "
                         + String.format(Locale.US, "%.3f ms", (double) colorFrame.getClass().getMethod("getTimestamp").invoke(colorFrame))
@@ -275,7 +281,8 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
         CameraFrame frame = new CameraFrame(frameId, Math.round(timestampMs * 1_000_000d), domainName,
                 width, height, depthStride, intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy, scale,
                 calibrationId, firmware, sdkVersion, serial,
-                z16, depthMeters, valid, depthBitmap, rgbBitmap, rgbTimestampNs, rgbDomainName);
+                z16, depthMeters, valid, depthBitmap, rgbBitmap, rgbTimestampNs, rgbDomainName,
+                rgbDepthCalibrationJson);
         Listener current = listener;
         if (current != null && running.get()) current.onFrame(frame);
         else { depthBitmap.recycle(); if (rgbBitmap != null) rgbBitmap.recycle(); }
@@ -295,12 +302,67 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
         }
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         bitmap.setPixels(pixels, 0, width, 0, 0, width, height);
+        // RGB8 has no transparency. Mark opaque before sharing with preview/storage
+        // so Android's PNG encoder writes RGB instead of an unused alpha channel.
+        bitmap.setHasAlpha(false);
         return bitmap;
     }
 
     private static byte[] readBytes(Object frame) throws Exception {
         int n = (int) frame.getClass().getMethod("getDataSize").invoke(frame);
         byte[] data = new byte[n]; frame.getClass().getMethod("getData", byte[].class).invoke(frame, (Object) data); return data;
+    }
+
+    /** Capture actual active-stream calibration; never infer identity from equal resolutions. */
+    private String readRgbDepthCalibration(Object depthVideo, Object colorVideo) throws Exception {
+        Object depthProfile = depthVideo.getClass().getMethod("getProfile").invoke(depthVideo);
+        Object colorProfile = null;
+        try {
+            colorProfile = colorVideo.getClass().getMethod("getProfile").invoke(colorVideo);
+            Object extrinsic = depthProfile.getClass().getMethod("getExtrinsicTo", Class.forName(SDK + "StreamProfile"))
+                    .invoke(depthProfile, colorProfile);
+            org.json.JSONObject result = new org.json.JSONObject();
+            result.put("format", "mobile-rgb-depth-calibration-v1");
+            result.put("source", "active_realsense_stream_profiles");
+            result.put("validation_status", "unverified");
+            result.put("depth_source_intrinsics", profileIntrinsics(depthProfile));
+            result.put("color_intrinsics", profileIntrinsics(colorProfile));
+            org.json.JSONObject transform = new org.json.JSONObject();
+            transform.put("from", "depth_camera"); transform.put("to", "color_camera");
+            transform.put("rotation_layout", "column_major");
+            transform.put("rotation", finiteArray(arrayField(extrinsic, "mRotation"), 9));
+            transform.put("translation_m", finiteArray(arrayField(extrinsic, "mTranslation"), 3));
+            result.put("depth_to_color", transform);
+            return result.toString();
+        } finally { closeQuietly(colorProfile); closeQuietly(depthProfile); }
+    }
+
+    private org.json.JSONObject profileIntrinsics(Object profile) throws Exception {
+        Object ext = enumValue(Class.forName(SDK + "Extension"), "VIDEO_PROFILE");
+        Object video = profile.getClass().getMethod("as", Class.forName(SDK + "Extension")).invoke(profile, ext);
+        // The wrapper's as() view borrows the profile handle; close only the owning profile.
+        Object intrinsic = video.getClass().getMethod("getIntrinsic").invoke(video);
+        org.json.JSONObject result = new org.json.JSONObject();
+        result.put("width", intrinsic.getClass().getMethod("getWidth").invoke(intrinsic));
+        result.put("height", intrinsic.getClass().getMethod("getHeight").invoke(intrinsic));
+        result.put("fx", field(intrinsic, "mFx")); result.put("fy", field(intrinsic, "mFy"));
+        result.put("cx", field(intrinsic, "mPpx")); result.put("cy", field(intrinsic, "mPpy"));
+        result.put("model", intrinsic.getClass().getMethod("getModel").invoke(intrinsic).toString());
+        result.put("coeffs", finiteArray(arrayField(intrinsic, "mCoeffs"), 5));
+        result.put("profile_uid", profile.getClass().getMethod("getUniqueId").invoke(profile));
+        result.put("fps", profile.getClass().getMethod("getFrameRate").invoke(profile));
+        result.put("pixel_format", profile.getClass().getMethod("getFormat").invoke(profile).toString());
+        return result;
+    }
+
+    private static org.json.JSONArray finiteArray(float[] values, int length) throws Exception {
+        if (values.length != length) throw new IllegalStateException("Unexpected calibration array length");
+        org.json.JSONArray result = new org.json.JSONArray();
+        for (float value : values) {
+            if (!Float.isFinite(value)) throw new IllegalStateException("Non-finite calibration value");
+            result.put((double) value);
+        }
+        return result;
     }
 
     private IntrinsicsData readIntrinsics(Object videoFrame) throws Exception {

@@ -2,7 +2,7 @@
 
 USB로 연결한 Intel RealSense D405의 RGB·Depth 스트림과 휴대폰 IMU를 수집하는 네이티브 Android 앱입니다. 화면의 **데이터 수집** 버튼 하나로 수집과 로컬 저장을 시작·중지합니다.
 
-D405 RGB와 Depth는 같은 SDK 프레임 세트에서 받습니다. 별도 미리보기로 표시하고 저장하지만 픽셀 정렬과 시각 대응은 아직 검증되지 않아 `unverified`로 기록합니다. 서버 API가 아직 정해지지 않아 실제 네트워크 업로드와 중량 예측은 연결되지 않았습니다. 카메라가 RGB 프로파일을 열지 못하면 기존 Depth 스트림으로 전환해 Depth 수집을 계속합니다.
+D405 RGB와 Depth는 같은 SDK 프레임 세트에서 받습니다. 별도 미리보기로 표시하고 저장하지만 픽셀 정렬과 시각 대응은 아직 검증되지 않아 `unverified`로 기록합니다. API 업로드는 수집·저장 완료 후 버튼으로 실행합니다. 중량 예측은 아직 연결하지 않았습니다. 카메라가 RGB 프로파일을 열지 못하면 기존 Depth 스트림으로 전환해 Depth 수집을 계속합니다.
 
 ## 기능
 
@@ -14,9 +14,27 @@ D405 RGB와 Depth는 같은 SDK 프레임 세트에서 받습니다. 별도 미�
 - 세션별 JSON/JSONL 메타데이터와 원본 이미지·Depth 배열 저장
 - 저장이 끝난 세션 전체를 ZIP으로 내보내고 사용자가 선택한 위치에 저장
 - 프레임별 SDK 보정값과 원본 Z16 stride·버퍼 정보 기록
-- 수집 종료 시 세션 업로드 경계 호출
+- 저장 완료 세션을 API 업로드 버튼으로 수동 전송
 
-서버 업로드 인터페이스는 `SessionTransport`입니다. 현재 연결된 `UnconfiguredSessionTransport`는 서버 URL과 업로드 계약이 없음을 `SERVER_API_UNCONFIGURED`로 반환합니다. 이 상태에서 데이터는 앱 내부에 저장되며 서버로 전송되지는 않습니다. 중량도 서버의 실제 `PredictionResult`가 오기 전까지 표시하지 않습니다.
+서버 업로드 인터페이스는 `SessionTransport`이며, 업로드 버튼을 누를 때만
+`HttpSessionTransport`를 호출합니다. 자동 전송은 없습니다. 수집 정상 종료·저장 완료 후
+**수집 데이터 API 업로드** 버튼이 활성화됩니다. 업로드 중 수집/내보내기/중복 업로드는
+막고, 성공 또는 실패 후 다시 활성화합니다. 실패 시 같은 버튼으로 동일 ZIP을 재전송합니다.
+대상은 현재 실행 중에 마지막으로 정상 저장한 세션입니다. 앱 재실행 후 과거 세션 선택 UI는 없습니다.
+
+기준 주소는 `http://localhost:8000`입니다. Android의 loopback HTTP만 예외 허용합니다.
+PC에서 API 서버를 실행하고 USB 디버깅 연결을 허용한 뒤 PC PowerShell에서 설정합니다.
+
+```powershell
+& "$env:LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe" reverse tcp:8000 tcp:8000
+```
+
+이후 앱에서 수집 → 수집 중지 → 저장 완료 → API 업로드 버튼 순서로 실행합니다.
+휴대폰 localhost:8000을 PC localhost:8000에 연결하는 개발용 설정입니다.
+서버는 기존처럼 PC의 127.0.0.1:8000에 실행하며 LAN 공개는 필요하지 않습니다.
+현재 버튼은 Bearer 미설정 로컬 개발 서버용입니다. 인증이 설정된 서버는 업로드 실패로 표시합니다.
+중량은 서버의 실제 `PredictionResult`가 오기 전까지 표시하지 않습니다.
+검증 결과·재현·실기기 확인 범위는 [API 연결 검증 기록](API_INTEGRATION_VALIDATION.md)을 참조합니다.
 
 ## 개발 환경
 
@@ -28,7 +46,7 @@ D405 RGB와 Depth는 같은 SDK 프레임 세트에서 받습니다. 별도 미�
 | Android Gradle Plugin | 8.7.3 |
 | Gradle Wrapper | 8.9 |
 | `minSdk` / `targetSdk` | 24 / 35 |
-| 앱 버전 / 빌드 번호 | 0.5.1 / 5 |
+| 앱 버전 / 빌드 번호 | 0.5.2 / 6 |
 
 RealSense Android wrapper AAR는 `app/libs/librealsense.aar`에 포함되어 있습니다. 앱을 빌드하는 데 NDK와 CMake를 별도로 설치할 필요는 없습니다. AAR를 소스에서 다시 빌드할 때만 NDK `28.0.13004108`과 CMake `3.22.1`이 필요합니다.
 
@@ -68,7 +86,7 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## 화면과 수집 동작
 
-화면에는 D405 RGB와 Depth 컬러맵이 별도 영역으로 표시됩니다. **데이터 수집**을 누르면 IMU 기록과 D405 스트림 수집을 시작합니다. D405가 두 스트림 프레임을 받으면 Depth는 초당 최대 1프레임, RGB 이미지는 초당 1장씩 세션에 저장됩니다. IMU는 Android 센서 이벤트 주기로 기록됩니다. RGB 프로파일을 사용할 수 없는 경우 Depth는 계속 표시·저장되고 RGB 누락 상태를 보여줍니다.
+화면에는 D405 RGB와 Depth 컬러맵이 별도 영역으로 표시됩니다. **데이터 수집**을 누르면 IMU 기록과 D405 스트림 수집을 시작합니다. 수신 프레임 중 250ms 이상 간격으로 Depth와 해당 RGB를 선택해 세션에 저장합니다. 저장 목표는 초당 4프레임(4 FPS)이며, 수신 속도·휴대폰 처리 성능·저장 대기 상황에 따라 실제 저장 FPS가 낮아질 수 있습니다. 실제 저장 간격은 Depth의 `capture_time`과 RGB의 `time`으로 확인합니다. IMU는 Android 센서 이벤트 주기로 기록됩니다. RGB 프로파일을 사용할 수 없는 경우 Depth는 계속 표시·저장되고 RGB 누락 상태를 보여줍니다.
 
 수집 종료 시 앱은 세션 파일을 닫고 `SessionTransport.sendSession()`을 호출합니다. 현재는 전송 미구성 응답을 표시합니다. 네트워크 업로드를 활성화하려면 서버 URL, 인증 방식, 세션 업로드 요청 및 응답 계약을 확정한 뒤 이 어댑터를 구현해야 합니다.
 
@@ -81,6 +99,7 @@ app/build/outputs/apk/debug/app-debug.apk
 - 압축은 백그라운드에서 스트림 방식으로 처리합니다. 수집 중이거나 다른 내보내기가 진행 중일 때는 내보내기 버튼이 비활성화됩니다.
 - 현재 화면에서 저장 종료가 완료된 가장 최근 세션을 내보냅니다. 앱 재시작 후 기존 세션을 검색하거나 선택하는 기능은 없습니다.
 - 저장에 실패하면 오류를 표시합니다. 대상 위치에 불완전한 ZIP이 남았다면 삭제하고 다시 시도합니다.
+- ZIP 저장 위치를 열기 전에 RGB PNG의 실제 채널 형식·해상도·파일 해시와 인덱스 저장 개수를 확인합니다. RGB8과 맞지 않는 RGBA 파일 등이 발견되면 ‘RGB 데이터 확인 필요’ 메시지 창을 표시하고 ZIP 생성을 중단합니다. 원래 세션 파일은 보존되며, 이 검사는 RGB/Depth 픽셀 정렬이나 색상 정확도 검증을 뜻하지 않습니다.
 
 ## 저장 파일 구조
 
@@ -135,6 +154,8 @@ RGB의 `frame_id`는 가장 최근 저장된 Depth 프레임을 참조하는 인
 원본 `raw/` 파일의 픽셀 `(x, y)`는 `y * raw_stride_bytes + x * 2` 바이트 위치에서 읽습니다. 패딩이 있을 수 있으므로 행 간격을 항상 `width * 2`로 가정하면 안 됩니다. 이 stride는 원본 Z16에 대한 값이며 NPZ 배열의 행 간격을 의미하지 않습니다. stride 필드는 변경된 앱으로 새로 수집한 데이터부터 저장되며 기존 파일에는 소급 추가되지 않습니다.
 
 `arrays.npz`의 `depth_m`은 광축 방향 거리(미터)의 float32 배열이며 `valid_mask`는 유효 픽셀을 나타냅니다. 원본 왜곡 모델이 `BROWN_CONRADY`이면 최근접 이웃 방식으로 핀홀 좌표에 재매핑하고, 원본 Z16은 `raw/`에 그대로 보존합니다. RGB 원본은 `rgb/`에 PNG로 저장하고 인덱스·해시는 `images.jsonl`에 기록합니다. 현재 RGB/Depth 픽셀 정렬과 시각 대응은 검증되지 않았습니다.
+
+새로 저장하는 RGB PNG는 알파 채널 없이 채널당 8비트인 RGB 3채널로 출력합니다. 저장 후 PNG 헤더의 bit depth 8·color type 2·해상도를 확인한 뒤 `images.jsonl`에 `encoding="RGB8"`과 파일 해시를 기록합니다. 조건이 맞지 않으면 저장 오류를 표시합니다. 이전에 수집한 RGBA PNG 세션은 그대로 보존하며, 이 변경으로 RGB/Depth 정렬·시각 대응 상태가 승격되지는 않습니다.
 
 촬영 대상과 별도 거리 입력은 현재 구현되어 있지 않아 `specimen_id`, `capture_conditions.material`, `capture_conditions.camera_distance_m`은 `null`입니다. 대상 영역의 유효 `depth_m` 중앙값으로 대략적인 광축 방향 거리를 추정할 수 있지만, 배경이 섞이지 않도록 대상 영역을 지정해야 합니다.
 

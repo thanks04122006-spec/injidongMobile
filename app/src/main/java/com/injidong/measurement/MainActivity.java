@@ -1,6 +1,7 @@
 package com.injidong.measurement;
 
 import android.content.Context;
+import android.app.AlertDialog;
 import android.Manifest;
 import android.graphics.Color;
 import android.graphics.Insets;
@@ -46,6 +47,7 @@ import androidx.activity.result.contract.ActivityResultContracts;
 /** Native Android measurement screen with D405 RGB/Depth and phone IMU input. */
 public final class MainActivity extends ComponentActivity implements SensorEventListener {
     private static final int CAMERA_PERMISSION_REQUEST = 31;
+    private static final long FRAME_SAVE_INTERVAL_MS = 250L;
     private static final int BG = Color.rgb(11, 17, 27);
     private static final int PANEL = Color.rgb(22, 31, 45);
     private static final int MUTED = Color.rgb(157, 173, 193);
@@ -69,6 +71,10 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
     private Button streamButton;
     private Button exportButton;
     private TextView exportStatus;
+    private Button uploadButton;
+    private TextView uploadStatus;
+    private File uploadableSession;
+    private boolean uploading;
     private File exportableSession;
     private File pendingExportSession;
     private boolean exporting;
@@ -109,7 +115,6 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
     private final Map<Integer, float[]> latestImuValues = new HashMap<>();
     private DepthCameraAdapter depthCameraAdapter;
     private CaptureSessionWriter captureWriter;
-    private SessionTransport sessionTransport;
     private ExecutorService saveExecutor;
     private boolean streaming;
     private boolean cameraConnected;
@@ -129,7 +134,6 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         refreshUsbDevices();
         renderNoResult("서버의 실제 예측 결과를 아직 받지 못했습니다.");
         depthCameraAdapter = new RealSenseDepthCameraAdapter(this);
-        sessionTransport = new UnconfiguredSessionTransport();
         saveExecutor = Executors.newSingleThreadExecutor();
     }
 
@@ -189,23 +193,17 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         LinearLayout.LayoutParams streamLp = new LinearLayout.LayoutParams(-1, dp(50)); streamLp.topMargin = dp(8); cameraBox.addView(streamButton, streamLp);
         exportButton = button("수집 데이터 ZIP 내보내기");
         exportButton.setEnabled(false);
-        exportButton.setOnClickListener(v -> {
-            if (exportableSession == null || streaming || exporting) return;
-            pendingExportSession = exportableSession;
-            exporting = true;
-            updateExportButton();
-            try { exportLauncher.launch(pendingExportSession.getName() + ".zip"); }
-            catch (Exception e) {
-                exporting = false;
-                pendingExportSession = null;
-                exportStatus.setText("저장 위치를 열지 못했습니다: " + e.getMessage());
-                updateExportButton();
-            }
-        });
+        exportButton.setOnClickListener(v -> beginValidatedExport());
         cameraBox.addView(exportButton, matchWrap());
         exportStatus = text("수집을 중지하고 저장이 끝나면 세션 전체를 ZIP으로 내보낼 수 있습니다.", 12, MUTED, false);
         cameraBox.addView(exportStatus, matchWrap());
-        TextView limitation = text("‘데이터 수집’ 버튼 하나로 D405 RGB·Depth와 휴대폰 IMU 수집 및 로컬 저장을 함께 시작·중지합니다. RGB/Depth 픽셀 정렬과 시각 대응은 검증 전까지 unverified로 기록합니다. 중지 시 세션 전송 경계를 호출하지만 서버 API 미확정으로 현재 전송은 대기 처리됩니다.", 12, Color.rgb(255, 211, 117), false);
+        uploadButton = button("수집 데이터 API 업로드");
+        uploadButton.setEnabled(false);
+        uploadButton.setOnClickListener(v -> beginManualUpload());
+        cameraBox.addView(uploadButton, matchWrap());
+        uploadStatus = text("수집 종료·저장 완료 후 버튼을 눌러 전송합니다. 자동 업로드는 하지 않습니다.\n서버: localhost:8000 · PC 연결은 adb reverse 설정이 필요합니다.", 12, MUTED, false);
+        cameraBox.addView(uploadStatus, matchWrap());
+        TextView limitation = text("‘데이터 수집’ 버튼 하나로 D405 RGB·Depth와 휴대폰 IMU 수집 및 로컬 저장을 함께 시작·중지합니다. RGB/Depth 픽셀 정렬과 시각 대응은 검증 전까지 unverified로 기록합니다. API 전송은 별도의 업로드 버튼을 눌렀을 때만 실행됩니다.", 12, Color.rgb(255, 211, 117), false);
         limitation.setPadding(0, dp(8), 0, 0); cameraBox.addView(limitation, matchWrap());
         page.addView(cameraBox, new LinearLayout.LayoutParams(-1, -2));
 
@@ -296,6 +294,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
     private int dp(float value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
 
     private void startRealSense() {
+        if (uploading || exporting) return;
         if (depthCameraAdapter instanceof RealSenseDepthCameraAdapter && !((RealSenseDepthCameraAdapter) depthCameraAdapter).isSdkAvailable()) {
             cameraStatus.setText("RealSense Android SDK가 앱에 포함되지 않았습니다. librealsense.aar를 android-app/app/libs에 넣고 다시 빌드하세요.");
             return;
@@ -324,6 +323,8 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
             activeSessionDirectory = new File(new File(documents, "sessions"), sessionId);
             if (!activeSessionDirectory.mkdirs() && !activeSessionDirectory.isDirectory()) throw new IOException("세션 폴더를 만들 수 없습니다.");
             captureWriter = new CaptureSessionWriter(activeSessionDirectory, sessionId);
+            uploadableSession = null;
+            uploadStatus.setText("수집 중 · 저장이 완료되면 API 업로드 버튼이 활성화됩니다.");
             persistedFrameCount = 0; persistedRgbCount = 0; lastPersistedFrameMs = 0; streaming = true;
             updateExportButton();
             streamButton.setText("데이터 수집 중지");
@@ -358,7 +359,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                                 frame.frameId, frame.width, frame.height, center, validCount * 100.0 / frame.validMask.length, persistedFrameCount));
                         long now = android.os.SystemClock.elapsedRealtime();
                         CaptureSessionWriter writer = captureWriter;
-                        if (writer != null && now - lastPersistedFrameMs >= 1000) {
+                        if (writer != null && now - lastPersistedFrameMs >= FRAME_SAVE_INTERVAL_MS) {
                             lastPersistedFrameMs = now;
                             saveExecutor.execute(() -> {
                                 try {
@@ -409,14 +410,14 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                 writer.close();
                 runOnUiThread(() -> {
                     exportableSession = finishedSession;
+                    uploadableSession = "complete".equals(sessionStatus) ? finishedSession : null;
+                    uploadStatus.setText(uploadableSession != null
+                            ? "전송 대기 · " + finishedSession.getName() + "\nAPI 업로드 버튼을 누르면 localhost:8000으로 전송합니다."
+                            : "수집이 정상 완료되지 않아 API 업로드할 수 없습니다.");
                     streamButton.setEnabled(true);
                     exportStatus.setText("내보내기 준비 완료 · " + finishedSession.getName()
                             + " · JSON/JSONL, raw/, rgb/, 프레임별 metadata.json·arrays.npz 포함");
                     updateExportButton();
-                });
-                if (sessionTransport != null && finishedSession != null) sessionTransport.sendSession(finishedSession, new SessionTransport.Callback() {
-                    @Override public void onComplete() { runOnUiThread(() -> cameraStatus.setText("수집·저장·전송 완료 · " + finishedSession.getAbsolutePath())); }
-                    @Override public void onError(String code, String message) { runOnUiThread(() -> cameraStatus.setText("수집·저장 완료 · 전송 대기(" + code + "): " + message)); }
                 });
             }
             catch (Exception e) { runOnUiThread(() -> {
@@ -431,8 +432,91 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                 : finalStatus + " · 저장 Depth " + persistedFrameCount + "프레임");
     }
 
+    private void beginValidatedExport() {
+        if (exportableSession == null || streaming || exporting || uploading) return;
+        File session = exportableSession;
+        exporting = true;
+        updateExportButton();
+        exportStatus.setText("ZIP 저장 전 RGB 파일을 확인하는 중…");
+        saveExecutor.execute(() -> {
+            try {
+                RgbExportValidator.validate(session);
+            } catch (Exception error) {
+                String reason = error.getMessage() == null ? "RGB 파일 검사를 완료하지 못했습니다." : error.getMessage();
+                runOnUiThread(() -> {
+                    exporting = false;
+                    pendingExportSession = null;
+                    updateExportButton();
+                    exportStatus.setText("RGB 검사 실패 · ZIP을 저장하지 않았습니다.");
+                    if (!isFinishing() && !isDestroyed()) new AlertDialog.Builder(this)
+                            .setTitle("RGB 데이터 확인 필요")
+                            .setMessage(reason + "\n\nZIP 저장을 중단했습니다. 수집 데이터는 유지됩니다. RGB8 저장이 가능한 앱으로 다시 수집해 주세요.")
+                            .setPositiveButton("확인", null)
+                            .show();
+                });
+                return;
+            }
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) {
+                    exporting = false;
+                    return;
+                }
+                pendingExportSession = session;
+                exportStatus.setText("RGB 검사 완료 · ZIP 저장 위치를 선택해 주세요.");
+                try { exportLauncher.launch(session.getName() + ".zip"); }
+                catch (Exception error) {
+                    exporting = false;
+                    pendingExportSession = null;
+                    exportStatus.setText("저장 위치를 열지 못했습니다: " + error.getMessage());
+                    updateExportButton();
+                }
+            });
+        });
+    }
+
     private void updateExportButton() {
-        if (exportButton != null) exportButton.setEnabled(exportableSession != null && !streaming && !exporting);
+        if (exportButton != null) exportButton.setEnabled(exportableSession != null && !streaming && !exporting && !uploading);
+        if (uploadButton != null) uploadButton.setEnabled(uploadableSession != null && !streaming && !exporting && !uploading);
+        if (streamButton != null && !streaming) streamButton.setEnabled(!exporting && !uploading);
+    }
+
+    /** The only HTTP upload entry point: an explicit user button click. */
+    private void beginManualUpload() {
+        if (uploadableSession == null || streaming || exporting || uploading
+                || saveExecutor == null || saveExecutor.isShutdown()) return;
+        File session = uploadableSession;
+        uploading = true;
+        uploadButton.setText("API 업로드 중…");
+        uploadStatus.setText("RGB 검사·ZIP 준비·업로드 중… " + session.getName());
+        updateExportButton();
+        saveExecutor.execute(() -> {
+            try {
+                RgbExportValidator.validate(session);
+                new HttpSessionTransport(HttpSessionTransport.LOCAL_TEST_ORIGIN, null)
+                        .sendSession(session, new SessionTransport.Callback() {
+                            @Override public void onComplete() {
+                                finishManualUpload("API 업로드 완료 · " + session.getName()
+                                        + "\n서버 저장 정보의 ID·크기·SHA-256을 확인했습니다.");
+                            }
+                            @Override public void onError(String code, String message) {
+                                finishManualUpload("API 업로드 확인 실패 (" + code + ")\n"
+                                        + "PC 서버 실행과 adb reverse tcp:8000 tcp:8000을 확인하고 다시 누르세요. 동일 ZIP으로 재시도합니다.");
+                            }
+                        });
+            } catch (Exception error) {
+                finishManualUpload("업로드 준비 실패 · 수집 파일과 RGB 형식을 확인하고 다시 시도하세요. 로컬 데이터는 유지됩니다.");
+            }
+        });
+    }
+
+    private void finishManualUpload(String message) {
+        runOnUiThread(() -> {
+            uploading = false;
+            if (isFinishing() || isDestroyed()) return;
+            uploadButton.setText("수집 데이터 API 업로드");
+            uploadStatus.setText(message);
+            updateExportButton();
+        });
     }
 
     private void refreshUsbDevices() {
