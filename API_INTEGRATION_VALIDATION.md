@@ -18,7 +18,7 @@ network_security_config는 localhost/127.0.0.1에만 HTTP 예외를 적용한다
 이 절은 수동 업로드 버튼 추가 이전의 검증 이력이다.
 
 로컬 시험 통과 후 `SessionArchiveUpload.java`, `HttpSessionTransport.java`를 추가했다.
-MainActivity는 기존 `UnconfiguredSessionTransport`를 계속 사용한다.
+이 항목은 초기 구현 당시 기록이다. 현재 MainActivity는 `HttpSessionTransport`를 사용하며, 미사용 `UnconfiguredSessionTransport`는 삭제했다. 현재 실행 구조는 `APP_STRUCTURE.md`를 참조한다.
 자동 업로드, 서버 주소 입력 화면, cleartext 허용, LAN 공개는 활성화하지 않았다.
 기준 주소는 `http://localhost:8000`이다. 휴대폰의 localhost는 휴대폰 자신이다.
 실기기 연결은 후속 작업이며 debug HTTP 정책과 연결 경로를 따로 검증해야 한다.

@@ -53,6 +53,15 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
     private static final int MUTED = Color.rgb(157, 173, 193);
     private android.widget.ImageView rgbPreview;
     private android.widget.ImageView depthPreview;
+    private PointCloudView sessionCloudView;
+    private TextView depthTag, depthPlaceholder;
+    private Button cloudRetryButton;
+    private Button cloudResetButton;
+    private final android.os.Handler cloudHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final ExecutorService cloudExecutor = Executors.newSingleThreadExecutor();
+    private String cloudSessionId;
+    private int cloudGeneration, cloudAttempts;
+    private boolean cloudReady, cloudPaused = true;
     private TextView rgbStatus;
     private TextView rgbDiagnosticsView;
     private TextView cameraStatus;
@@ -165,9 +174,6 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         TextView subtitle = text("Depth 입력 및 예측 결과", 14, MUTED, false);
         subtitle.setPadding(0, dp(5), 0, dp(14));
         page.addView(subtitle, matchWrap());
-        Button viewerButton = button("3D 포인트 클라우드 뷰어");
-        viewerButton.setOnClickListener(v -> startActivity(new android.content.Intent(this, PointCloudActivity.class)));
-        page.addView(viewerButton, matchWrap());
 
         LinearLayout cameraBox = card();
         cameraStatus = text("D405 연결 대기", 13, MUTED, true);
@@ -181,9 +187,26 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         FrameLayout depthBox = new FrameLayout(this); depthBox.setBackgroundColor(Color.BLACK);
         depthPreview = new android.widget.ImageView(this); depthPreview.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
         depthBox.addView(depthPreview, new FrameLayout.LayoutParams(-1, -1));
-        TextView depthTag = text("RealSense Depth 미리보기", 12, Color.WHITE, true); depthTag.setPadding(dp(8), dp(5), dp(8), dp(5)); depthTag.setBackgroundColor(0x990B111B);
+        sessionCloudView = new PointCloudView(this);
+        sessionCloudView.setVisibility(android.view.View.GONE);
+        depthBox.addView(sessionCloudView, new FrameLayout.LayoutParams(-1, -1));
+        depthPlaceholder = text("", 14, Color.WHITE, false);
+        depthPlaceholder.setGravity(Gravity.CENTER);
+        depthPlaceholder.setPadding(dp(12), dp(40), dp(12), dp(12));
+        depthPlaceholder.setVisibility(android.view.View.GONE);
+        depthBox.addView(depthPlaceholder, new FrameLayout.LayoutParams(-1, -1));
+        depthTag = text("RealSense Depth 미리보기", 12, Color.WHITE, true); depthTag.setPadding(dp(8), dp(5), dp(8), dp(5)); depthTag.setBackgroundColor(0x990B111B);
         FrameLayout.LayoutParams depthTagLp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START); depthTagLp.setMargins(dp(8), dp(8), 0, 0); depthBox.addView(depthTag, depthTagLp);
         LinearLayout.LayoutParams depthLp = new LinearLayout.LayoutParams(-1, dp(210)); depthLp.topMargin = dp(8); cameraBox.addView(depthBox, depthLp);
+        cloudRetryButton = button("3D 결과를 다시 확인");
+        cloudRetryButton.setVisibility(android.view.View.GONE);
+        cloudRetryButton.setOnClickListener(v -> { cloudAttempts = 0; querySessionCloud(); });
+        cameraBox.addView(cloudRetryButton, matchWrap());
+        Button cloudReset = button("3D 시점 초기화");
+        cloudReset.setOnClickListener(v -> sessionCloudView.resetView());
+        cloudReset.setVisibility(android.view.View.GONE);
+        cameraBox.addView(cloudReset, matchWrap());
+        cloudResetButton = cloudReset;
         rgbStatus = text("D405 RGB 프레임을 기다리고 있습니다.", 12, MUTED, false); rgbStatus.setPadding(0, dp(7), 0, 0); cameraBox.addView(rgbStatus, matchWrap());
         TextView diagnosticTitle = text("RGB 수신 진단", 12, Color.WHITE, true); diagnosticTitle.setPadding(0, dp(8), 0, dp(3)); cameraBox.addView(diagnosticTitle, matchWrap());
         rgbDiagnosticsView = text("진단 대기 · ‘데이터 수집’을 누르면 USB/SDK/RGB 단계별 상태가 표시됩니다.", 11, MUTED, false);
@@ -326,6 +349,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
             activeSessionDirectory = new File(new File(documents, "sessions"), sessionId);
             if (!activeSessionDirectory.mkdirs() && !activeSessionDirectory.isDirectory()) throw new IOException("세션 폴더를 만들 수 없습니다.");
             captureWriter = new CaptureSessionWriter(activeSessionDirectory, sessionId);
+            resetSessionCloud();
             uploadableSession = null;
             uploadStatus.setText("수집 중 · 저장이 완료되면 API 업로드 버튼이 활성화됩니다.");
             persistedFrameCount = 0; persistedRgbCount = 0; lastPersistedFrameMs = 0; streaming = true;
@@ -407,6 +431,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         streamButton.setEnabled(false);
         exportButton.setEnabled(false);
         exportStatus.setText("수집 파일 저장 마무리 중…");
+        showCloudPlaceholder("수집 파일 저장 마무리 중…");
         if (writer != null && saveExecutor != null && !saveExecutor.isShutdown()) saveExecutor.execute(() -> {
             try {
                 writer.writeSessionSummary(sessionStatus, finishedImuCount);
@@ -414,6 +439,9 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                 runOnUiThread(() -> {
                     exportableSession = finishedSession;
                     uploadableSession = "complete".equals(sessionStatus) ? finishedSession : null;
+                    showCloudPlaceholder(uploadableSession != null
+                            ? "저장 완료 · 서버 업로드 대기\n아래 API 업로드 버튼을 눌러 주세요."
+                            : "수집이 정상 완료되지 않았습니다.\n다시 수집해 주세요.");
                     uploadStatus.setText(uploadableSession != null
                             ? "전송 대기 · " + finishedSession.getName() + "\n전송 서버: " + BuildConfig.API_ORIGIN
                             : "수집이 정상 완료되지 않아 API 업로드할 수 없습니다.");
@@ -488,9 +516,14 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         if (uploadableSession == null || streaming || exporting || uploading
                 || saveExecutor == null || saveExecutor.isShutdown()) return;
         File session = uploadableSession;
+        cloudGeneration++;
+        cloudHandler.removeCallbacksAndMessages(null);
+        cloudSessionId = null; cloudReady = false;
+        cloudRetryButton.setVisibility(android.view.View.GONE);
         uploading = true;
         uploadButton.setText("API 업로드 중…");
         uploadStatus.setText("RGB 검사·ZIP 준비·업로드 중… " + session.getName());
+        showCloudPlaceholder("서버 업로드 중…\n완료 후 이 세션의 3D 결과를 확인합니다.");
         updateExportButton();
         saveExecutor.execute(() -> {
             try {
@@ -499,9 +532,15 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                         .sendSession(session, new SessionTransport.Callback() {
                             @Override public void onComplete() {
                                 finishManualUpload("API 업로드 완료 · " + session.getName()
-                                        + "\n서버 저장 정보의 ID·크기·SHA-256을 확인했습니다.");
+                                        + "\n서버 저장 정보 확인 완료 · 3D 결과는 준비되면 Depth 영역에 자동 표시됩니다.");
+                                runOnUiThread(() -> {
+                                    if (isFinishing() || isDestroyed() || streaming || uploadableSession != session) return;
+                                    cloudSessionId = session.getName(); cloudReady = false; cloudAttempts = 0;
+                                    querySessionCloud();
+                                });
                             }
                             @Override public void onError(String code, String message) {
+                                runOnUiThread(() -> showCloudPlaceholder("업로드에 실패했습니다.\nAPI 업로드 버튼으로 다시 시도하세요."));
                                 finishManualUpload("API 업로드 확인 실패 (" + code + ")\n"
                                         + ("UNAUTHORIZED".equals(code) ? "팀 토큰 설정을 확인하세요."
                                         : "인터넷 연결과 PC 서버·HTTPS 터널 실행 상태 및 서버 주소를 확인하세요.")
@@ -509,6 +548,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                             }
                         });
             } catch (Exception error) {
+                runOnUiThread(() -> showCloudPlaceholder("업로드를 준비하지 못했습니다.\n수집 파일을 확인하고 다시 시도하세요."));
                 finishManualUpload("업로드 준비 실패 · 수집 파일과 RGB 형식을 확인하고 다시 시도하세요. 로컬 데이터는 유지됩니다.");
             }
         });
@@ -522,6 +562,82 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
             uploadStatus.setText(message);
             updateExportButton();
         });
+    }
+
+    private void showCloudPlaceholder(String message) {
+        depthPreview.setVisibility(android.view.View.GONE);
+        sessionCloudView.setVisibility(android.view.View.GONE);
+        cloudResetButton.setVisibility(android.view.View.GONE);
+        depthTag.setText("수집 세션 3D 결과");
+        depthPlaceholder.setText(message);
+        depthPlaceholder.setVisibility(android.view.View.VISIBLE);
+    }
+
+    private void resetSessionCloud() {
+        cloudGeneration++; cloudSessionId = null; cloudReady = false;
+        cloudHandler.removeCallbacksAndMessages(null);
+        sessionCloudView.setPointCloud(new float[0], null);
+        sessionCloudView.setVisibility(android.view.View.GONE);
+        depthPlaceholder.setVisibility(android.view.View.GONE);
+        cloudRetryButton.setVisibility(android.view.View.GONE);
+        cloudResetButton.setVisibility(android.view.View.GONE);
+        depthPreview.setImageDrawable(null);
+        depthPreview.setVisibility(android.view.View.VISIBLE);
+        depthTag.setText("RealSense Depth 미리보기");
+    }
+
+    private void querySessionCloud() {
+        if (cloudSessionId == null || cloudPaused || streaming || isFinishing() || isDestroyed()) return;
+        final String expectedSession = cloudSessionId;
+        final int generation = ++cloudGeneration;
+        cloudHandler.removeCallbacksAndMessages(null);
+        cloudRetryButton.setVisibility(android.view.View.GONE);
+        showCloudPlaceholder("업로드 완료 · 이 세션의 3D 결과 확인 중…");
+        cloudExecutor.execute(() -> {
+            try {
+                PointCloudApi.Cloud cloud = PointCloudApi.load(expectedSession);
+                runOnUiThread(() -> {
+                    if (generation != cloudGeneration || cloudPaused || streaming || isDestroyed()) return;
+                    if (cloud == null) {
+                        showCloudPlaceholder("업로드 완료 · 서버 3D 결과 대기 중\n준비되면 자동으로 표시합니다.");
+                        if (++cloudAttempts < 60) cloudHandler.postDelayed(this::querySessionCloud, 3000);
+                        else {
+                            showCloudPlaceholder("서버 3D 결과가 아직 없습니다.\n나중에 다시 확인해 주세요.");
+                            cloudRetryButton.setVisibility(android.view.View.VISIBLE);
+                        }
+                        return;
+                    }
+                    sessionCloudView.setPointCloud(cloud.xyz, cloud.rgb);
+                    depthPlaceholder.setVisibility(android.view.View.GONE);
+                    depthPreview.setVisibility(android.view.View.GONE);
+                    sessionCloudView.setVisibility(android.view.View.VISIBLE);
+                    cloudResetButton.setVisibility(android.view.View.VISIBLE);
+                    depthTag.setText("세션 3D · " + expectedSession);
+                    depthStatus.setText("3D 결과 · " + cloud.xyz.length/3 + " points · 한 손가락 회전 / 두 손가락 이동 / 핀치 확대");
+                    cloudReady = true;
+                });
+            } catch (Exception failure) {
+                runOnUiThread(() -> {
+                    if (generation != cloudGeneration || cloudPaused || isDestroyed()) return;
+                    showCloudPlaceholder("업로드는 완료됐지만 3D 결과를 받지 못했습니다.\n서버 연결과 결과 준비 상태를 확인하세요.");
+                    cloudRetryButton.setVisibility(android.view.View.VISIBLE);
+                });
+            }
+        });
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        refreshUsbDevices();
+        sessionCloudView.onResume(); cloudPaused = false;
+        if (!cloudReady) querySessionCloud();
+    }
+
+    @Override protected void onPause() {
+        cloudPaused = true; cloudGeneration++;
+        cloudHandler.removeCallbacksAndMessages(null);
+        sessionCloudView.onPause();
+        super.onPause();
     }
 
     private void refreshUsbDevices() {
@@ -701,11 +817,11 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         errorView.setText(reason); errorView.setTextColor(Color.rgb(255, 211, 117));
     }
 
-    @Override protected void onResume() { super.onResume(); refreshUsbDevices(); }
     // USB permission UI can temporarily pause this Activity. Keep the pending SDK
     // connection alive; the user can stop explicitly or onDestroy will clean up.
-    @Override protected void onPause() { super.onPause(); }
     @Override protected void onDestroy() {
+        cloudGeneration++; cloudHandler.removeCallbacksAndMessages(null);
+        cloudExecutor.shutdownNow();
         stopRealSense();
         if (saveExecutor != null) { saveExecutor.shutdown(); saveExecutor = null; }
         super.onDestroy();

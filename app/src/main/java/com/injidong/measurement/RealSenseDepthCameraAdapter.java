@@ -28,7 +28,6 @@ public final class RealSenseDepthCameraAdapter implements DepthCameraAdapter {
     private String lastRgbDiagnostic;
 
     public RealSenseDepthCameraAdapter(Context context) { this.appContext = context.getApplicationContext(); }
-    @Override public String name() { return "Intel RealSense SDK 2.0 Android wrapper"; }
     @Override public boolean supports(UsbDevice device) { return device != null && device.getVendorId() == 0x8086; }
     public boolean isSdkAvailable() {
         try { Class.forName(SDK + "RsContext"); return true; }

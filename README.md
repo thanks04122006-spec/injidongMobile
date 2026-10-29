@@ -6,10 +6,15 @@ D405 RGB와 Depth는 같은 SDK 프레임 세트에서 받습니다. 별도 미�
 
 ## 기능
 
-- 측정 화면의 **3D 포인트 클라우드 뷰어** 버튼으로 별도 뷰어 열기
+- 별도 뷰어 테스트 버튼 없이, 수동 업로드 성공 후 서버가 반환하는 해당 세션의 결과를 Depth 영역에 자동 표시합니다. 검토용 전역 점군 조회 및 로컬 파일 선택은 측정 화면에서 사용하지 않습니다.
+- 수집 중에는 Depth 영역에 실시간 미리보기, 종료 후에는 저장·수동 업로드 대기 표시
+- **수집 데이터 API 업로드** 버튼을 눌러 성공한 세션만 3D 결과 조회 시작 (자동 업로드 없음)
+- 해당 세션 결과가 준비되면 같은 Depth 영역에 3D 표시, 재수집 시 Depth로 복귀
 - 한 손가락 회전, 두 손가락 이동, 핀치 확대·축소, 시점 초기화
-- 뷰어 진입 시 HTTPS `GET /api/v1/pointclouds/review`를 Bearer 인증으로 조회합니다. 수신한 기존 포인트의 좌표·색상을 표시하며 점 개수를 갱신합니다. 실패 시 오류 안내와 다시 불러오기 버튼을 제공합니다.
+- 업로드 성공 후 `GET /api/v1/sessions/{session_id}/pointcloud`를 Bearer 인증으로 조회합니다. HTTP 202는 대기로 처리하고 3초 간격으로 최대 60회 확인합니다. 이후 또는 오류 시 결과 재확인 버튼을 표시합니다. HTTP 200의 `X-Session-Id`가 일치해야 3D로 전환합니다. 다른 세션의 검토 데이터로 대체하지 않습니다.
 - 서버는 기존 `review_arrays.npz`를 읽습니다. 새 포인트 생성이나 로컬 샘플 대체는 하지 않습니다. 표시 좌표만 중심·크기를 정규화하며 원본 배열은 변경하지 않습니다.
+- 서버의 세션 결과 경로는 `data/pointclouds/{session_id}.npz`입니다. 생성 파이프라인은 아직 없으며 해당 결과가 없으면 대기를 유지합니다.
+- Pixel 9 로컬 디버깅은 `assembleDebug -PinjidongDebugOrigin=http://localhost:8000 -PinjidongViewerDebug`와 `adb -s emulator-5554 reverse tcp:8000 tcp:8000`으로 연결합니다. 별도 앱 ID `.viewerdebug`를 사용하며 release 설정은 HTTPS를 유지합니다.
 - D405 RGB와 Depth 미리보기 및 별도 파일 저장
 - RGB 수신 진단 영역에서 USB·SDK 장치 검색·프로파일·프레임 변환 상태 표시
 - D405 USB 연결, RGB(RGB8)·Depth(Z16) 수신 및 각각 미리보기 표시
@@ -161,6 +166,8 @@ RGB의 `frame_id`는 가장 최근 저장된 Depth 프레임을 참조하는 인
 
 ## 소스 파일 안내
 
+파일별 역할, 실행 흐름과 주요 변수·상수는 [앱 구조 설명](APP_STRUCTURE.md)을 참조합니다.
+
 ```text
 .
 ├── app/
@@ -175,7 +182,12 @@ RGB의 `frame_id`는 가장 최근 저장된 Depth 프레임을 참조하는 인
 │       │   ├── CaptureSessionWriter.java # JSON/JSONL, PNG, NPZ, 세션 저장
 │       │   ├── SessionZipExporter.java # 세션 폴더 전체 ZIP 스트림 내보내기
 │       │   ├── SessionTransport.java   # 전체 세션 업로드 인터페이스
-│       │   └── UnconfiguredSessionTransport.java # 미설정 서버 응답
+│       │   ├── HttpSessionTransport.java # 업로드 ZIP 고정 및 서버 수신 정보 검증
+│       │   ├── SessionArchiveUpload.java # multipart HTTP 업로드
+│       │   ├── PointCloudApi.java      # 세션별 서버 3D 결과 조회
+│       │   ├── PointCloudView.java     # 화면 내 OpenGL ES 3D 렌더링
+│       │   ├── RgbExportValidator.java # RGB 인덱스·해시·개수 검사
+│       │   └── RgbPngValidator.java    # PNG RGB8 헤더 검사
 │       └── res/values/styles.xml       # 앱 테마
 ├── gradle/wrapper/                    # 프로젝트 고정 Gradle Wrapper
 ├── .gitignore                         # Gradle/Android 생성 파일 제외

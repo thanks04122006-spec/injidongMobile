@@ -41,7 +41,9 @@ public final class PointCloudView extends GLSurfaceView {
 
     @Override public boolean onTouchEvent(MotionEvent event) {
         int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) getParent().requestDisallowInterceptTouchEvent(true);
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            getParent().requestDisallowInterceptTouchEvent(false);
             lastCount = 0;
             if (action == MotionEvent.ACTION_UP) performClick();
             return true;

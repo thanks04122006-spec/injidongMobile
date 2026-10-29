@@ -29,18 +29,6 @@ public interface DepthCameraAdapter {
                            float depthScaleToMeters, String calibrationId, String firmware,
                            String sdkVersion, String serial, byte[] rawDepthZ16, float[] depthMeters,
                            boolean[] validMask, android.graphics.Bitmap depthPreview,
-                           android.graphics.Bitmap rgbPreview, long rgbCaptureTimeNs, String rgbClockDomain) {
-            this(frameId, captureTimeNs, clockDomain, width, height, rawDepthStrideBytes,
-                    fx, fy, cx, cy, depthScaleToMeters, calibrationId, firmware, sdkVersion,
-                    serial, rawDepthZ16, depthMeters, validMask, depthPreview, rgbPreview,
-                    rgbCaptureTimeNs, rgbClockDomain, null);
-        }
-
-        public CameraFrame(String frameId, long captureTimeNs, String clockDomain,
-                           int width, int height, int rawDepthStrideBytes, float fx, float fy, float cx, float cy,
-                           float depthScaleToMeters, String calibrationId, String firmware,
-                           String sdkVersion, String serial, byte[] rawDepthZ16, float[] depthMeters,
-                           boolean[] validMask, android.graphics.Bitmap depthPreview,
                            android.graphics.Bitmap rgbPreview, long rgbCaptureTimeNs, String rgbClockDomain,
                            String rgbDepthCalibrationJson) {
             this.frameId = frameId; this.captureTimeNs = captureTimeNs; this.clockDomain = clockDomain;
@@ -62,7 +50,6 @@ public interface DepthCameraAdapter {
         void onFrame(CameraFrame frame);
         void onError(String code, String message);
     }
-    String name();
     boolean supports(UsbDevice device);
     void connect(UsbDevice device, Listener listener);
     void disconnect();

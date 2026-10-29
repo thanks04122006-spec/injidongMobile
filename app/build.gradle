@@ -10,6 +10,12 @@ def javaString = { value -> '"' + value.replace('\\', '\\\\').replace('"', '\\"'
 
 android {
     buildFeatures { buildConfig true }
+    buildTypes {
+        debug {
+            if (project.hasProperty('injidongViewerDebug')) applicationIdSuffix '.viewerdebug'
+            buildConfigField 'String', 'API_ORIGIN', javaString(project.findProperty('injidongDebugOrigin') ?: apiOrigin)
+        }
+    }
     namespace 'com.injidong.measurement'
     compileSdk 35
     defaultConfig {
