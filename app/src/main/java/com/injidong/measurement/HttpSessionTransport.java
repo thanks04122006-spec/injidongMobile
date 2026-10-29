@@ -6,7 +6,6 @@ import org.json.JSONObject;
 
 /** Optional adapter. No default activation; invoke on a background worker. */
 public final class HttpSessionTransport implements SessionTransport {
-    public static final String LOCAL_TEST_ORIGIN = "https://lawyers-specific-allied-cigarette.trycloudflare.com";
     private final SessionArchiveUpload uploader;
     public HttpSessionTransport(String origin, String bearerToken) throws Exception {
         uploader = new SessionArchiveUpload(origin, bearerToken);

@@ -165,6 +165,9 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         TextView subtitle = text("Depth 입력 및 예측 결과", 14, MUTED, false);
         subtitle.setPadding(0, dp(5), 0, dp(14));
         page.addView(subtitle, matchWrap());
+        Button viewerButton = button("3D 포인트 클라우드 뷰어");
+        viewerButton.setOnClickListener(v -> startActivity(new android.content.Intent(this, PointCloudActivity.class)));
+        page.addView(viewerButton, matchWrap());
 
         LinearLayout cameraBox = card();
         cameraStatus = text("D405 연결 대기", 13, MUTED, true);
@@ -201,7 +204,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         uploadButton.setEnabled(false);
         uploadButton.setOnClickListener(v -> beginManualUpload());
         cameraBox.addView(uploadButton, matchWrap());
-        uploadStatus = text("수집 종료·저장 완료 후 버튼을 눌러 전송합니다. 자동 업로드는 하지 않습니다.\n서버: localhost:8000 · PC 연결은 adb reverse 설정이 필요합니다.", 12, MUTED, false);
+        uploadStatus = text("수집 종료·저장 완료 후 버튼을 눌러 전송합니다. 자동 업로드는 하지 않습니다.\n서버: " + BuildConfig.API_ORIGIN, 12, MUTED, false);
         cameraBox.addView(uploadStatus, matchWrap());
         TextView limitation = text("‘데이터 수집’ 버튼 하나로 D405 RGB·Depth와 휴대폰 IMU 수집 및 로컬 저장을 함께 시작·중지합니다. RGB/Depth 픽셀 정렬과 시각 대응은 검증 전까지 unverified로 기록합니다. API 전송은 별도의 업로드 버튼을 눌렀을 때만 실행됩니다.", 12, Color.rgb(255, 211, 117), false);
         limitation.setPadding(0, dp(8), 0, 0); cameraBox.addView(limitation, matchWrap());
@@ -412,7 +415,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                     exportableSession = finishedSession;
                     uploadableSession = "complete".equals(sessionStatus) ? finishedSession : null;
                     uploadStatus.setText(uploadableSession != null
-                            ? "전송 대기 · " + finishedSession.getName() + "\nAPI 업로드 버튼을 누르면 localhost:8000으로 전송합니다."
+                            ? "전송 대기 · " + finishedSession.getName() + "\n전송 서버: " + BuildConfig.API_ORIGIN
                             : "수집이 정상 완료되지 않아 API 업로드할 수 없습니다.");
                     streamButton.setEnabled(true);
                     exportStatus.setText("내보내기 준비 완료 · " + finishedSession.getName()
@@ -492,7 +495,7 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
         saveExecutor.execute(() -> {
             try {
                 RgbExportValidator.validate(session);
-                new HttpSessionTransport(HttpSessionTransport.LOCAL_TEST_ORIGIN, null)
+                new HttpSessionTransport(BuildConfig.API_ORIGIN, BuildConfig.API_TOKEN)
                         .sendSession(session, new SessionTransport.Callback() {
                             @Override public void onComplete() {
                                 finishManualUpload("API 업로드 완료 · " + session.getName()
@@ -500,7 +503,9 @@ public final class MainActivity extends ComponentActivity implements SensorEvent
                             }
                             @Override public void onError(String code, String message) {
                                 finishManualUpload("API 업로드 확인 실패 (" + code + ")\n"
-                                        + "PC 서버 실행과 adb reverse tcp:8000 tcp:8000을 확인하고 다시 누르세요. 동일 ZIP으로 재시도합니다.");
+                                        + ("UNAUTHORIZED".equals(code) ? "팀 토큰 설정을 확인하세요."
+                                        : "인터넷 연결과 PC 서버·HTTPS 터널 실행 상태 및 서버 주소를 확인하세요.")
+                                        + " 동일 ZIP으로 재시도합니다.");
                             }
                         });
             } catch (Exception error) {

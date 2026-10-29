@@ -6,6 +6,10 @@ D405 RGB와 Depth는 같은 SDK 프레임 세트에서 받습니다. 별도 미�
 
 ## 기능
 
+- 측정 화면의 **3D 포인트 클라우드 뷰어** 버튼으로 별도 뷰어 열기
+- 한 손가락 회전, 두 손가락 이동, 핀치 확대·축소, 시점 초기화
+- 뷰어 진입 시 HTTPS `GET /api/v1/pointclouds/review`를 Bearer 인증으로 조회합니다. 수신한 기존 포인트의 좌표·색상을 표시하며 점 개수를 갱신합니다. 실패 시 오류 안내와 다시 불러오기 버튼을 제공합니다.
+- 서버는 기존 `review_arrays.npz`를 읽습니다. 새 포인트 생성이나 로컬 샘플 대체는 하지 않습니다. 표시 좌표만 중심·크기를 정규화하며 원본 배열은 변경하지 않습니다.
 - D405 RGB와 Depth 미리보기 및 별도 파일 저장
 - RGB 수신 진단 영역에서 USB·SDK 장치 검색·프로파일·프레임 변환 상태 표시
 - D405 USB 연결, RGB(RGB8)·Depth(Z16) 수신 및 각각 미리보기 표시
@@ -22,17 +26,13 @@ D405 RGB와 Depth는 같은 SDK 프레임 세트에서 받습니다. 별도 미�
 막고, 성공 또는 실패 후 다시 활성화합니다. 실패 시 같은 버튼으로 동일 ZIP을 재전송합니다.
 대상은 현재 실행 중에 마지막으로 정상 저장한 세션입니다. 앱 재실행 후 과거 세션 선택 UI는 없습니다.
 
-기준 주소는 `http://localhost:8000`입니다. Android의 loopback HTTP만 예외 허용합니다.
-PC에서 API 서버를 실행하고 USB 디버깅 연결을 허용한 뒤 PC PowerShell에서 설정합니다.
-
-```powershell
-& "$env:LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe" reverse tcp:8000 tcp:8000
-```
-
-이후 앱에서 수집 → 수집 중지 → 저장 완료 → API 업로드 버튼 순서로 실행합니다.
-휴대폰 localhost:8000을 PC localhost:8000에 연결하는 개발용 설정입니다.
-서버는 기존처럼 PC의 127.0.0.1:8000에 실행하며 LAN 공개는 필요하지 않습니다.
-현재 버튼은 Bearer 미설정 로컬 개발 서버용입니다. 인증이 설정된 서버는 업로드 실패로 표시합니다.
+기본 업로드 주소는 `https://too-interfaces-tuition-ruled.trycloudflare.com`입니다.
+인터넷 연결 후 수집 → 수집 중지 → 저장 완료 → API 업로드 버튼 순서로 실행합니다.
+인증은 `Authorization: Bearer` 헤더로 전송합니다. 팀 토큰은 Git에서 제외된
+`local.properties`의 `injidong.api.token`에 설정하고 APK를 다시 빌드합니다.
+주소가 바뀌면 같은 파일의 `injidong.api.origin`을 변경하고 다시 빌드합니다.
+토큰은 소스·오류 보고에 넣지 마세요. 인증값이 포함된 APK는 팀 내에서만 공유합니다.
+PC 종료·절전 또는 HTTPS 터널 종료 시 외부 접속이 끊깁니다.
 중량은 서버의 실제 `PredictionResult`가 오기 전까지 표시하지 않습니다.
 검증 결과·재현·실기기 확인 범위는 [API 연결 검증 기록](API_INTEGRATION_VALIDATION.md)을 참조합니다.
 
@@ -88,7 +88,7 @@ app/build/outputs/apk/debug/app-debug.apk
 
 화면에는 D405 RGB와 Depth 컬러맵이 별도 영역으로 표시됩니다. **데이터 수집**을 누르면 IMU 기록과 D405 스트림 수집을 시작합니다. 수신 프레임 중 250ms 이상 간격으로 Depth와 해당 RGB를 선택해 세션에 저장합니다. 저장 목표는 초당 4프레임(4 FPS)이며, 수신 속도·휴대폰 처리 성능·저장 대기 상황에 따라 실제 저장 FPS가 낮아질 수 있습니다. 실제 저장 간격은 Depth의 `capture_time`과 RGB의 `time`으로 확인합니다. IMU는 Android 센서 이벤트 주기로 기록됩니다. RGB 프로파일을 사용할 수 없는 경우 Depth는 계속 표시·저장되고 RGB 누락 상태를 보여줍니다.
 
-수집 종료 시 앱은 세션 파일을 닫고 `SessionTransport.sendSession()`을 호출합니다. 현재는 전송 미구성 응답을 표시합니다. 네트워크 업로드를 활성화하려면 서버 URL, 인증 방식, 세션 업로드 요청 및 응답 계약을 확정한 뒤 이 어댑터를 구현해야 합니다.
+수집 종료 시 세션 파일 저장을 마무리합니다. 저장 완료 후 사용자가 API 업로드 버튼을 눌렀을 때만 HTTPS 서버에 전송합니다.
 
 ### ZIP 내보내기
 
@@ -188,5 +188,5 @@ RGB의 `frame_id`는 가장 최근 저장된 Depth 프레임을 참조하는 인
 - 사용자 확인에 따르면 휴대폰 디버그 실행으로 촬영 데이터를 수집하고 파일을 추출했습니다. ZIP 내보내기와 stride 저장 변경 이후의 실기기 검증 결과는 아직 확인되지 않았습니다.
 - D405 RGB 스트림 추가 후 `gradlew.bat assembleDebug` 빌드가 성공했습니다. 사용자 실기기 화면에서 D405 RGB 640×480 RGB8 프레임 수신·미리보기와 저장 동작을 확인했습니다. 화면 진단값은 stride 1920 bytes입니다.
 - D405 RGB와 Depth의 시각 대응, 외참수, 픽셀 정렬은 검증되지 않았습니다.
-- 서버 업로드 API와 중량 예측 모델이 연결되지 않았습니다. 중량은 실제 예측 결과가 있을 때만 표시해야 합니다.
+- 서버 업로드 API는 HTTPS와 Bearer 인증으로 연결합니다. 중량 예측 모델은 연결되지 않았습니다. 중량은 실제 예측 결과가 있을 때만 표시해야 합니다.
 - `local.properties`, `.gradle/`, `app/build/`, `.idea/`는 기기별 설정 또는 생성 파일이므로 Git에서 제외됩니다. `gradlew`와 Gradle Wrapper 파일은 빌드 재현을 위해 저장소에 포함합니다.
